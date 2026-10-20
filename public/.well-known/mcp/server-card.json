@@ -1,0 +1,489 @@
+{
+  "serverInfo": {
+    "name": "edgar-entity-mcp",
+    "version": "0.1.0"
+  },
+  "authentication": {
+    "required": false
+  },
+  "tools": [
+    {
+      "name": "search_company",
+      "title": "Search SEC registrants",
+      "description": "Find SEC-registered public companies by ticker or name (fuzzy). Returns CIK (the SEC id used by every other tool), name, tickers, exchange and a match score (100 = exact ticker). Source: SEC company_tickers_exchange.json (companies with a listed ticker).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker or company name, e.g. 'MSFT', 'berkshire', 'Tesla Inc'"
+          },
+          "limit": {
+            "default": 5,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 25
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    },
+    {
+      "name": "get_company_profile",
+      "title": "Company profile (EDGAR)",
+      "description": "Company profile from SEC EDGAR submissions: legal name, tickers, exchanges, SIC code + industry, state of incorporation, fiscal year end, EIN, filer category, business/mailing addresses, former names, latest 10-K/10-Q. Use it to orient before deeper research.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
+          }
+        },
+        "required": [
+          "company"
+        ]
+      }
+    },
+    {
+      "name": "list_filings",
+      "title": "List SEC filings",
+      "description": "List a company's EDGAR filings newest-first, filtered by form type and filing-date range. Each row has form, accession, filed date, report period, primary document URL and filing index URL. Amendments (e.g. 10-K/A) are included when filtering by the base form unless include_amendments=false. Older history pages are fetched automatically when needed. Common forms: 10-K, 10-Q, 8-K, DEF 14A, S-1, 4, 13D/G (SC 13D), 20-F, 6-K.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
+          },
+          "forms": {
+            "description": "Form types to include, e.g. ['10-K','10-Q']. Omit for all.",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 20
+            }
+          },
+          "include_amendments": {
+            "default": true,
+            "type": "boolean"
+          },
+          "date_from": {
+            "description": "Filed on/after (YYYY-MM-DD)",
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "date_to": {
+            "description": "Filed on/before (YYYY-MM-DD)",
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          },
+          "offset": {
+            "default": 0,
+            "description": "Skip this many matching filings (pagination)",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5000
+          }
+        },
+        "required": [
+          "company"
+        ]
+      }
+    },
+    {
+      "name": "get_filing_document",
+      "title": "Read a filing document",
+      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "url": {
+            "description": "Document URL on www.sec.gov/Archives",
+            "type": "string",
+            "format": "uri"
+          },
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
+          },
+          "accession": {
+            "description": "Accession number, e.g. 0000320193-24-000123",
+            "type": "string"
+          },
+          "section": {
+            "description": "Item id to extract, e.g. '1A', '7', 'Item 7A'",
+            "type": "string",
+            "maxLength": 10
+          },
+          "max_chars": {
+            "default": 20000,
+            "type": "integer",
+            "minimum": 500,
+            "maximum": 100000
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 9007199254740991
+          }
+        }
+      }
+    },
+    {
+      "name": "get_financials",
+      "title": "Normalized financials (XBRL)",
+      "description": "Key financial metrics normalized from SEC XBRL companyfacts, one row per fiscal period (deduped; as-filed values from the filing that reported the period). Metrics: revenue, gross_profit, operating_income, net_income, eps_basic, eps_diluted, operating_cash_flow, capex, total_assets, total_liabilities, stockholders_equity, cash, long_term_debt, shares_outstanding, free_cash_flow (derived). Revenue tries common tags in order (Revenues, RevenueFromContractWithCustomerExcludingAssessedTax, SalesRevenueNet, ...) and tags_used reports which was used. period_type 'quarterly' returns 3-month values (cash-flow quarters derived from YTD; Q4 derived as FY minus 9M). Values are raw (e.g. 391035000000 = $391.0B).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
+          },
+          "period_type": {
+            "default": "annual",
+            "type": "string",
+            "enum": [
+              "annual",
+              "quarterly"
+            ]
+          },
+          "limit": {
+            "default": 5,
+            "description": "Number of most recent periods",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 20
+          },
+          "metrics": {
+            "description": "Subset of metrics to return (default all)",
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "free_cash_flow",
+                "revenue",
+                "gross_profit",
+                "operating_income",
+                "net_income",
+                "eps_basic",
+                "eps_diluted",
+                "operating_cash_flow",
+                "capex",
+                "total_assets",
+                "total_liabilities",
+                "stockholders_equity",
+                "cash",
+                "long_term_debt",
+                "shares_outstanding"
+              ]
+            }
+          }
+        },
+        "required": [
+          "company"
+        ]
+      }
+    },
+    {
+      "name": "get_xbrl_concept",
+      "title": "XBRL concept history",
+      "description": "All reported values of one XBRL concept for one company (SEC companyconcept API), newest first, deduped by period. Use for any tag not in get_financials, e.g. us-gaap:ResearchAndDevelopmentExpense, us-gaap:LongTermDebt, dei:EntityCommonStockSharesOutstanding. framed_only=true keeps only SEC's one-fact-per-calendar-period values (cleanest time series).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
+          },
+          "tag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Concept name, case-sensitive, e.g. 'ResearchAndDevelopmentExpense'. 'us-gaap:Tag' form also accepted."
+          },
+          "taxonomy": {
+            "default": "us-gaap",
+            "type": "string",
+            "enum": [
+              "us-gaap",
+              "ifrs-full",
+              "dei",
+              "srt",
+              "invest"
+            ]
+          },
+          "unit": {
+            "description": "e.g. USD, shares, USD/shares, pure. Default: USD if present else first unit",
+            "type": "string",
+            "maxLength": 40
+          },
+          "forms": {
+            "description": "Only facts from these forms, e.g. ['10-K']",
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "framed_only": {
+            "default": false,
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "required": [
+          "company",
+          "tag"
+        ]
+      }
+    },
+    {
+      "name": "compare_companies",
+      "title": "Cross-company comparison (XBRL frames)",
+      "description": "Compare one XBRL concept across ALL reporting companies for a calendar period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, required for balance-sheet items like Assets). Pass companies to filter to specific tickers/CIKs; otherwise returns the top `limit` by value.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "tag": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "e.g. 'Revenues', 'NetIncomeLoss', 'Assets'"
+          },
+          "period": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 12,
+            "description": "CY2024, CY2024Q3, or CY2024Q4I"
+          },
+          "taxonomy": {
+            "default": "us-gaap",
+            "type": "string",
+            "enum": [
+              "us-gaap",
+              "ifrs-full",
+              "dei",
+              "srt"
+            ]
+          },
+          "unit": {
+            "default": "USD",
+            "description": "USD, USD-per-shares, shares, pure",
+            "type": "string",
+            "maxLength": 40
+          },
+          "companies": {
+            "description": "Tickers or CIKs to include (default: all)",
+            "maxItems": 25,
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "order": {
+            "default": "desc",
+            "type": "string",
+            "enum": [
+              "desc",
+              "asc"
+            ]
+          },
+          "limit": {
+            "default": 20,
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "tag",
+          "period"
+        ]
+      }
+    },
+    {
+      "name": "get_insider_trades",
+      "title": "Insider trades (Form 4)",
+      "description": "Recent insider transactions for a company (issuer) from SEC Form 4 / 4/A XML: reporter name, role and officer title, transaction date, code with plain-English meaning (P=open-market buy, S=sale, A=grant, M=option exercise, F=tax withholding, G=gift...), shares, price, value, acquired/disposed, shares owned after, direct/indirect, plus a summary of open-market buys vs sales. `limit` counts filings (each filing can hold several transactions).",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "company": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
+          },
+          "limit": {
+            "default": 10,
+            "description": "Number of most recent Form 4 filings to parse",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 40
+          },
+          "include_amendments": {
+            "default": true,
+            "type": "boolean"
+          },
+          "date_from": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "YYYY-MM-DD"
+          },
+          "date_to": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "YYYY-MM-DD"
+          },
+          "transaction_codes": {
+            "description": "Only these codes, e.g. ['P','S'] for open-market trades",
+            "maxItems": 20,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 1
+            }
+          },
+          "include_footnotes": {
+            "default": false,
+            "description": "Include footnote text (10b5-1 plan details, price ranges)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "company"
+        ]
+      }
+    },
+    {
+      "name": "lookup_business_entity",
+      "title": "State business-entity registry lookup",
+      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available, and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "Entity name or fragment, e.g. 'Tiffany and Company'",
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 200
+          },
+          "entity_id": {
+            "description": "State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state.",
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 40
+          },
+          "states": {
+            "description": "Default: all supported states",
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "NY",
+                "CO",
+                "OR",
+                "CT",
+                "PA"
+              ]
+            }
+          },
+          "match": {
+            "default": "contains",
+            "type": "string",
+            "enum": [
+              "contains",
+              "starts_with",
+              "exact"
+            ]
+          },
+          "active_only": {
+            "default": false,
+            "description": "Exclude dissolved/inactive entities (CO, CT)",
+            "type": "boolean"
+          },
+          "limit": {
+            "default": 5,
+            "description": "Max results per state",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        }
+      }
+    },
+    {
+      "name": "list_supported_states",
+      "title": "Supported state registries & licenses",
+      "description": "List the state business-entity registries supported by lookup_business_entity, with dataset ids, coverage caveats, update frequency, and license/commercial-use terms.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      }
+    }
+  ],
+  "resources": [
+    {
+      "uri": "edgar-entity://data-sources",
+      "name": "data-sources",
+      "mimeType": "text/markdown"
+    }
+  ],
+  "prompts": [
+    {
+      "name": "company_research_brief",
+      "arguments": [
+        {
+          "name": "company",
+          "required": true
+        },
+        {
+          "name": "focus",
+          "required": false
+        }
+      ]
+    }
+  ]
+}

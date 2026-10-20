@@ -1,0 +1,55 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.OWNER/edgar-entity-mcp",
+  "title": "EDGAR + Entity: US Company Research",
+  "description": "SEC EDGAR filings, XBRL financials, Form 4 insider trades + state business-entity registry lookups",
+  "websiteUrl": "https://github.com/OWNER/edgar-entity-mcp",
+  "repository": {
+    "url": "https://github.com/OWNER/edgar-entity-mcp",
+    "source": "github"
+  },
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "edgar-entity-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "SEC_USER_AGENT",
+          "description": "Required by SEC fair-access policy: '<Name or Company> <email>'",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "SOCRATA_APP_TOKEN",
+          "description": "Optional Socrata app token for higher state-registry rate limits",
+          "isRequired": false,
+          "isSecret": true
+        },
+        {
+          "name": "UPSTASH_REDIS_REST_URL",
+          "description": "Optional Upstash Redis REST URL for a shared cache",
+          "isRequired": false
+        },
+        {
+          "name": "UPSTASH_REDIS_REST_TOKEN",
+          "description": "Optional Upstash Redis REST token",
+          "isRequired": false,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://edgar-entity-mcp.vercel.app/mcp"
+    }
+  ]
+}

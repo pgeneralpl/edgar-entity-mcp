@@ -1,0 +1,109 @@
+{
+  "$schema": "https://raw.githubusercontent.com/modelcontextprotocol/mcpb/main/schemas/mcpb-manifest-v0.4.schema.json",
+  "manifest_version": "0.4",
+  "name": "edgar-entity-mcp",
+  "display_name": "EDGAR + Entity: US Company Research",
+  "version": "0.1.0",
+  "description": "SEC EDGAR filings, XBRL financials, Form 4 insider trades and state business-entity registries for AI agents.",
+  "long_description": "Research any US company from official public data: resolve tickers to CIKs, read 10-K/10-Q sections as clean text, get normalized financials from XBRL, compare companies with SEC frames, parse Form 4 insider trades, and look up legal entities in NY, CO, OR, CT and PA Secretary of State registries. Compact JSON with source URLs.",
+  "author": {
+    "name": "OWNER"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OWNER/edgar-entity-mcp"
+  },
+  "homepage": "https://github.com/OWNER/edgar-entity-mcp",
+  "license": "MIT",
+  "keywords": [
+    "sec",
+    "edgar",
+    "xbrl",
+    "financials",
+    "insider-trading",
+    "secretary-of-state",
+    "company-research"
+  ],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/stdio.js",
+    "mcp_config": {
+      "command": "node",
+      "args": [
+        "${__dirname}/dist/stdio.js"
+      ],
+      "env": {
+        "SEC_USER_AGENT": "${user_config.sec_user_agent}",
+        "SOCRATA_APP_TOKEN": "${user_config.socrata_app_token}"
+      }
+    }
+  },
+  "user_config": {
+    "sec_user_agent": {
+      "type": "string",
+      "title": "SEC User-Agent",
+      "description": "Required by SEC fair-access policy: your name or company and an email, e.g. 'Acme Research jane@acme.com'.",
+      "required": true
+    },
+    "socrata_app_token": {
+      "type": "string",
+      "title": "Socrata app token (optional)",
+      "description": "Raises rate limits for state registry lookups. Free from any Socrata portal (e.g. data.ny.gov developer settings).",
+      "required": false,
+      "sensitive": true,
+      "default": ""
+    }
+  },
+  "compatibility": {
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ],
+    "runtimes": {
+      "node": ">=20.0.0"
+    }
+  },
+  "tools": [
+    {
+      "name": "search_company",
+      "description": "Find SEC-registered public companies by ticker or name (fuzzy)"
+    },
+    {
+      "name": "get_company_profile",
+      "description": "Company profile from SEC EDGAR submissions: legal name, tickers, exchanges, SIC code + industry, state of incorporation, fiscal year end, EIN, filer category, business/mailing addresses, former names,"
+    },
+    {
+      "name": "list_filings",
+      "description": "List a company's EDGAR filings newest-first, filtered by form type and filing-date range"
+    },
+    {
+      "name": "get_filing_document",
+      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows)"
+    },
+    {
+      "name": "get_financials",
+      "description": "Key financial metrics normalized from SEC XBRL companyfacts, one row per fiscal period (deduped; as-filed values from the filing that reported the period)"
+    },
+    {
+      "name": "get_xbrl_concept",
+      "description": "All reported values of one XBRL concept for one company (SEC companyconcept API), newest first, deduped by period"
+    },
+    {
+      "name": "compare_companies",
+      "description": "Compare one XBRL concept across ALL reporting companies for a calendar period (SEC frames API), e.g"
+    },
+    {
+      "name": "get_insider_trades",
+      "description": "Recent insider transactions for a company (issuer) from SEC Form 4 / 4/A XML: reporter name, role and officer title, transaction date, code with plain-English meaning (P=open-market buy, S=sale, A=gra"
+    },
+    {
+      "name": "lookup_business_entity",
+      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id"
+    },
+    {
+      "name": "list_supported_states",
+      "description": "List the state business-entity registries supported by lookup_business_entity, with dataset ids, coverage caveats, update frequency, and license/commercial-use terms."
+    }
+  ]
+}

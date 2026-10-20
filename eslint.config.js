@@ -2,7 +2,7 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 
 export default tseslint.config(
-  { ignores: ["dist", "node_modules", ".vercel", "coverage"] },
+  { ignores: ["dist", "node_modules", ".vercel", "coverage", "scratch", "smoke-output"] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
