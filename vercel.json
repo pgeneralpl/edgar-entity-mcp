@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "public",
+  "functions": {
+    "api/mcp.ts": { "maxDuration": 60, "memory": 1024 }
+  },
+  "rewrites": [{ "source": "/mcp", "destination": "/api/mcp" }]
+}
