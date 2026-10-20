@@ -1,0 +1,94 @@
+{
+  "name": "edgar-entity-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for US company research: SEC EDGAR filings, XBRL financials, insider trades (Form 4) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA).",
+  "type": "module",
+  "license": "MIT",
+  "author": "",
+  "mcpName": "io.github.OWNER/edgar-entity-mcp",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "sec",
+    "edgar",
+    "xbrl",
+    "form-4",
+    "insider-trading",
+    "secretary-of-state",
+    "business-entity",
+    "company-research",
+    "financials",
+    "ai-agent"
+  ],
+  "homepage": "https://github.com/OWNER/edgar-entity-mcp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OWNER/edgar-entity-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OWNER/edgar-entity-mcp/issues"
+  },
+  "bin": {
+    "edgar-entity-mcp": "dist/stdio.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./http": {
+      "types": "./dist/http/handler.d.ts",
+      "default": "./dist/http/handler.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "DATA_SOURCES.md",
+    "LICENSES"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/stdio.js",
+    "dev:stdio": "tsx src/stdio.ts",
+    "dev:http": "tsx src/http/node-server.ts",
+    "start:http": "node dist/http/node-server.js",
+    "typecheck": "npm run build --silent && tsc -p tsconfig.json --noEmit && tsc -p tsconfig.scripts.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke": "tsx scripts/smoke.ts",
+    "smoke:e2e": "npm run build && tsx scripts/smoke.ts && tsx scripts/e2e-http.ts && tsx scripts/e2e-vercel-fn.ts",
+    "check": "npm run typecheck && npm run lint && npm test",
+    "prepublishOnly": "npm run check && npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.3.1",
+    "@upstash/redis": "^1.39.0",
+    "esbuild": "^0.28.2",
+    "fast-xml-parser": "^5.11.2",
+    "html-to-text": "^10.0.1",
+    "lru-cache": "^11.5.3",
+    "mcp-handler": "^2.3.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@modelcontextprotocol/client": "^2.3.1",
+    "@types/html-to-text": "^9.0.4",
+    "@types/node": "^20.19.43",
+    "eslint": "^10.13.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^4.1.12"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true
+  }
+}
