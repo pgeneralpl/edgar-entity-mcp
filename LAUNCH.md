@@ -1,11 +1,11 @@
 # Launch kit: edgar-entity-mcp
 
-Before using any of this copy, replace `OWNER` with the GitHub org or user. Replace the remote URL placeholder `https://edgar-entity-mcp.vercel.app/mcp` once the server is deployed.
+Repo: https://github.com/pgeneralpl/edgar-entity-mcp. Replace the remote URL placeholder `https://edgar-entity-mcp.vercel.app/mcp` once the server is deployed.
 
 ## Pre-launch checklist (owner)
 
-1. `gh repo create OWNER/edgar-entity-mcp --public --source . --push`
-2. Replace `OWNER` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file.
+1. ~~`gh repo create pgeneralpl/edgar-entity-mcp --public --source . --push`~~ (done)
+2. ~~Set owner `pgeneralpl` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file~~ (done)
 3. `npm login && npm publish --access public`. The name `edgar-entity-mcp` was available on 2026-10-20.
 4. Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`. Add the Upstash integration so the cache and rate budget are shared.
 5. MCP Registry: `mcp-publisher login github && mcp-publisher publish`. This uses `server.json`; the npm ownership check needs `mcpName` in the published package.json.
@@ -74,7 +74,7 @@ The data is free, official and commercially usable. 🧵
 
 6/ Works in Claude Desktop, Cursor, Claude Code and VS Code via stdio, or remotely over Streamable HTTP (Vercel). MIT licensed.
 
-Repo: github.com/OWNER/edgar-entity-mcp
+Repo: github.com/pgeneralpl/edgar-entity-mcp
 Feedback and state requests welcome 🙏
 
 ## Indie Hackers post
@@ -104,4 +104,4 @@ The code already has the hook points: API-key verification on the HTTP endpoint 
 
 I'd love feedback on two questions: which states or data would you pay for, and would you rather pay per call or per seat?
 
-Repo: github.com/OWNER/edgar-entity-mcp
+Repo: github.com/pgeneralpl/edgar-entity-mcp

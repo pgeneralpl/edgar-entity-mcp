@@ -1,7 +1,9 @@
 {
   "serverInfo": {
     "name": "edgar-entity-mcp",
-    "version": "0.1.0"
+    "title": "EDGAR + Entity Research",
+    "version": "0.1.0",
+    "websiteUrl": "https://github.com/pgeneralpl/edgar-entity-mcp"
   },
   "authentication": {
     "required": false

@@ -7,13 +7,13 @@
   "description": "SEC EDGAR filings, XBRL financials, Form 4 insider trades and state business-entity registries for AI agents.",
   "long_description": "Research any US company from official public data: resolve tickers to CIKs, read 10-K/10-Q sections as clean text, get normalized financials from XBRL, compare companies with SEC frames, parse Form 4 insider trades, and look up legal entities in NY, CO, OR, CT and PA Secretary of State registries. Compact JSON with source URLs.",
   "author": {
-    "name": "OWNER"
+    "name": "pgeneralpl"
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/OWNER/edgar-entity-mcp"
+    "url": "https://github.com/pgeneralpl/edgar-entity-mcp"
   },
-  "homepage": "https://github.com/OWNER/edgar-entity-mcp",
+  "homepage": "https://github.com/pgeneralpl/edgar-entity-mcp",
   "license": "MIT",
   "keywords": [
     "sec",

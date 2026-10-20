@@ -8,7 +8,7 @@ import { PACKAGE_NAME, VERSION } from "../src/version.js";
 writeFileSync("DATA_SOURCES.md", DATA_SOURCES_MD + "\n");
 
 const card = {
-  serverInfo: { name: PACKAGE_NAME, version: VERSION },
+  serverInfo: { name: PACKAGE_NAME, title: "EDGAR + Entity Research", version: VERSION, websiteUrl: "https://github.com/pgeneralpl/edgar-entity-mcp" },
   authentication: { required: false },
   tools: ALL_TOOLS.map((t) => ({ name: t.name, title: t.title, description: t.description, inputSchema: z.toJSONSchema(t.inputSchema, { io: "input" }) })),
   resources: [{ uri: "edgar-entity://data-sources", name: "data-sources", mimeType: "text/markdown" }],

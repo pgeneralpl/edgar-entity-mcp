@@ -18,17 +18,31 @@ jobs:
       - run: npm ci
       - run: npm run check
   smoke:
-    # Live calls to SEC + state portals; runs on main only to stay polite.
-    if: github.ref == 'refs/heads/main'
+    # Live calls to SEC + state portals; runs on main pushes only to stay polite.
+    # Skips (green) when the SEC_USER_AGENT repo secret is not configured.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: check
     runs-on: ubuntu-latest
     env:
       SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
     steps:
+      - name: Check for SEC_USER_AGENT secret
+        id: ua
+        run: |
+          if [ -z "$SEC_USER_AGENT" ]; then
+            echo "has_ua=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Live smoke skipped::Set the SEC_USER_AGENT repository secret (e.g. 'Your Name you@example.com') to enable live SEC/state smoke tests."
+          else
+            echo "has_ua=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/checkout@v4
+        if: steps.ua.outputs.has_ua == 'true'
       - uses: actions/setup-node@v4
+        if: steps.ua.outputs.has_ua == 'true'
         with:
           node-version: 22
           cache: npm
       - run: npm ci
+        if: steps.ua.outputs.has_ua == 'true'
       - run: npm run smoke:e2e
+        if: steps.ua.outputs.has_ua == 'true'

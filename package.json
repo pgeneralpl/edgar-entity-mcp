@@ -4,8 +4,8 @@
   "description": "MCP server for US company research: SEC EDGAR filings, XBRL financials, insider trades (Form 4) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA).",
   "type": "module",
   "license": "MIT",
-  "author": "",
-  "mcpName": "io.github.OWNER/edgar-entity-mcp",
+  "author": "pgeneralpl (https://github.com/pgeneralpl)",
+  "mcpName": "io.github.pgeneralpl/edgar-entity-mcp",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -20,13 +20,13 @@
     "financials",
     "ai-agent"
   ],
-  "homepage": "https://github.com/OWNER/edgar-entity-mcp#readme",
+  "homepage": "https://github.com/pgeneralpl/edgar-entity-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/OWNER/edgar-entity-mcp.git"
+    "url": "git+https://github.com/pgeneralpl/edgar-entity-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/OWNER/edgar-entity-mcp/issues"
+    "url": "https://github.com/pgeneralpl/edgar-entity-mcp/issues"
   },
   "bin": {
     "edgar-entity-mcp": "dist/stdio.js"

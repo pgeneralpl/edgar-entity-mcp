@@ -1,5 +1,9 @@
 # edgar-entity-mcp
 
+[![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · MCP Registry name: `io.github.pgeneralpl/edgar-entity-mcp`
+
 **US company research for AI agents, from official public data.** One MCP server that covers SEC EDGAR (filings, XBRL financials, Form 4 insider trades, cross-company comparisons) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA). Responses are compact JSON with source URLs, sized to keep token use low.
 
 - **Analysts**: "Compare TSLA, F and GM revenue for CY2023", "What did insiders sell at Apple this month?", "Summarize the latest 10-K risk factors."
