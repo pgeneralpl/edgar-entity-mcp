@@ -20,7 +20,7 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
       scope: redis && env.SEC_DISTRIBUTED_RATE_LIMIT !== "0" && env.DISTRIBUTED_RATE_LIMIT !== "0" ? "fleet (redis)" : "instance",
     },
     quotas: {
-      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay },
+      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay, units_per_day_per_network: c.quota.anonNetworkPerDay },
       api_key: { units_per_minute: c.quota.keyPerMinute, units_per_day: c.quota.keyPerDay },
     },
     sec_user_agent_configured: c.secUserAgentValid,

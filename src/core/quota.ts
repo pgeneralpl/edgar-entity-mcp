@@ -17,16 +17,20 @@ export interface Principal {
   /** Per-key overrides (from the key record). */
   perDay?: number;
   perMinute?: number;
+  /** Hashed enclosing network (IPv4 /24, IPv6 /48) for anonymous clients. */
+  network?: string;
 }
 
 export interface Limits {
   perMinute: number;
   perDay: number;
+  /** Daily cap shared by all anonymous clients of one network (limits IP rotation). */
+  networkPerDay?: number;
 }
 
 export interface QuotaDecision {
   ok: boolean;
-  scope?: "minute" | "day";
+  scope?: "minute" | "day" | "network";
   limit?: number;
   remaining?: number;
   retryAfterSeconds?: number;
@@ -70,7 +74,7 @@ export function toolCost(tool: string, args: unknown): number {
 export function limitsFor(p: Principal): Limits {
   const q = config().quota;
   if (p.tier === "key") return { perMinute: p.perMinute ?? q.keyPerMinute, perDay: p.perDay ?? q.keyPerDay };
-  return { perMinute: q.anonPerMinute, perDay: q.anonPerDay };
+  return { perMinute: q.anonPerMinute, perDay: q.anonPerDay, networkPerDay: q.anonNetworkPerDay };
 }
 
 const DAY_TTL: Record<Tier, number> = { anon: 2 * 86400, key: 35 * 86400 };
@@ -98,8 +102,13 @@ export class MemoryQuotaStore implements QuotaStore {
     const dk = `${p.id}:${utcDay(t)}`;
     const dUsed = this.day.get(dk) ?? 0;
     if (dUsed + cost > l.perDay) return { ok: false, scope: "day", limit: l.perDay, remaining: Math.max(0, l.perDay - dUsed), retryAfterSeconds: secondsToUtcMidnight(t) };
+    const nk = p.network && l.networkPerDay ? `${p.network}:${utcDay(t)}` : undefined;
+    const nUsed = nk ? (this.day.get(nk) ?? 0) : 0;
+    if (nk && nUsed + cost > l.networkPerDay!)
+      return { ok: false, scope: "network", limit: l.networkPerDay, remaining: Math.max(0, l.networkPerDay! - nUsed), retryAfterSeconds: secondsToUtcMidnight(t) };
     this.minute.set(p.id, { window: w, used: mUsed + cost });
     this.day.set(dk, dUsed + cost);
+    if (nk) this.day.set(nk, nUsed + cost);
     const u = this.usage.get(dk) ?? {};
     u[tool] = (u[tool] ?? 0) + 1;
     u.units = (u.units ?? 0) + cost;
@@ -110,13 +119,21 @@ export class MemoryQuotaStore implements QuotaStore {
 
 /**
  * Atomic daily quota + durable usage counters in ONE Redis command:
- * check used+cost <= limit, INCRBY, set TTL on first use, HINCRBY per-tool calls and units.
+ * check used+cost <= limit (and the network's shared cap for anonymous clients), INCRBY, set TTL on
+ * first use, HINCRBY per-tool calls and units.
  */
 const DAY_SCRIPT = `
 local used = tonumber(redis.call('GET', KEYS[1]) or '0')
 local cost = tonumber(ARGV[1])
 local limit = tonumber(ARGV[2])
 if used + cost > limit then return {0, used} end
+local netlimit = tonumber(ARGV[5] or '0')
+if KEYS[3] and netlimit > 0 then
+  local nused = tonumber(redis.call('GET', KEYS[3]) or '0')
+  if nused + cost > netlimit then return {2, nused} end
+  local nn = redis.call('INCRBY', KEYS[3], cost)
+  if nn == cost then redis.call('EXPIRE', KEYS[3], tonumber(ARGV[3])) end
+end
 local n = redis.call('INCRBY', KEYS[1], cost)
 if n == cost then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) end
 redis.call('HINCRBY', KEYS[2], ARGV[4], 1)
@@ -159,10 +176,12 @@ export class UpstashQuotaStore implements QuotaStore {
     if (!m.success || m.reason === "timeout")
       return { ok: false, scope: "minute", limit: l.perMinute, remaining: Math.max(0, m.remaining), retryAfterSeconds: Math.max(1, Math.ceil((m.reset - Date.now()) / 1000)) };
     const day = utcDay();
-    const [ok, used] = (await this.script.exec(
-      [`${this.prefix}q:d:${p.id}:${day}`, `${this.prefix}u:${p.id}:${day}`],
-      [String(cost), String(l.perDay), String(DAY_TTL[p.tier]), tool],
-    )) as [number, number];
+    const net = p.network && l.networkPerDay ? p.network : undefined;
+    const keys = [`${this.prefix}q:d:${p.id}:${day}`, `${this.prefix}u:${p.id}:${day}`];
+    if (net) keys.push(`${this.prefix}q:d:${net}:${day}`);
+    const [ok, used] = (await this.script.exec(keys, [String(cost), String(l.perDay), String(DAY_TTL[p.tier]), tool, String(net ? l.networkPerDay : 0)])) as [number, number];
+    if (Number(ok) === 2)
+      return { ok: false, scope: "network", limit: l.networkPerDay, remaining: Math.max(0, l.networkPerDay! - Number(used)), retryAfterSeconds: secondsToUtcMidnight() };
     if (Number(ok) !== 1) return { ok: false, scope: "day", limit: l.perDay, remaining: Math.max(0, l.perDay - Number(used)), retryAfterSeconds: secondsToUtcMidnight() };
     return { ok: true, limit: l.perDay, remaining: l.perDay - Number(used) };
   }
@@ -182,7 +201,7 @@ export function setQuotaStore(s: QuotaStore | undefined): void {
 
 export function rateLimitedError(p: Principal, d: QuotaDecision, cost: number): ToolError {
   const c = config();
-  const who = p.tier === "anon" ? "anonymous clients (per IP)" : "this API key";
+  const who = d.scope === "network" ? "all anonymous clients in your network (/24)" : p.tier === "anon" ? "anonymous clients (per IP)" : "this API key";
   const per = d.scope === "minute" ? "minute" : "day (UTC)";
   const hint =
     p.tier === "anon"

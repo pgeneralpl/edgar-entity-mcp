@@ -19,7 +19,7 @@ export interface Config {
   secUserAgentValid: boolean;
   /** Require an API key on the HTTP transport (anonymous calls rejected). */
   requireApiKey: boolean;
-  quota: { anonPerMinute: number; anonPerDay: number; keyPerMinute: number; keyPerDay: number };
+  quota: { anonPerMinute: number; anonPerDay: number; anonNetworkPerDay: number; keyPerMinute: number; keyPerDay: number };
   /** Salt for hashing client IPs before they are used as Redis keys. */
   ipHashSalt: string;
   /** Where users can request a free API key (shown in RATE_LIMITED hints). */
@@ -70,6 +70,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     quota: {
       anonPerMinute: num(env.QUOTA_ANON_PER_MINUTE, 30),
       anonPerDay: num(env.QUOTA_ANON_PER_DAY, 300),
+      anonNetworkPerDay: num(env.QUOTA_ANON_NETWORK_PER_DAY, 3000),
       keyPerMinute: num(env.QUOTA_KEY_PER_MINUTE, 120),
       keyPerDay: num(env.QUOTA_KEY_PER_DAY, 5000),
     },

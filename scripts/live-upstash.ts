@@ -12,6 +12,7 @@ const run = randomBytes(4).toString("hex");
 process.env.CACHE_PREFIX = `eem:livetest-${run}:`;
 process.env.QUOTA_ANON_PER_MINUTE = "5";
 process.env.QUOTA_ANON_PER_DAY = "1000";
+process.env.QUOTA_ANON_NETWORK_PER_DAY = "12";
 process.env.QUOTA_KEY_PER_MINUTE = "50";
 process.env.QUOTA_KEY_PER_DAY = "8";
 
@@ -67,6 +68,12 @@ try {
   check(seventh.limited, `7th call still limited (Redis requests: ${redisRequests - before}, ephemeral cache)`);
   check(!(await tool("search_company", { query: "AAPL", limit: 1 }, ipB)).limited, "other IP unaffected");
   console.log(`  Upstash requests: ${perAllowed.toFixed(1)} per allowed call, ${perBlocked} for first blocked call`);
+
+  console.log("Network /24 daily cap (12 units) against IP rotation");
+  const base = `198.51.100.`;
+  const rot: boolean[] = [];
+  for (let i = 0; i < 8; i++) rot.push((await tool("search_company", { query: "AAPL", limit: 1 }, { "x-real-ip": `${base}${210 + i}` })).limited);
+  check(rot.slice(0, 7).every((x) => !x) && rot[7], `5 + 7 units from rotating IPs allowed, then refused (${rot.map((x) => (x ? "L" : ".")).join("")})`);
 
   console.log("Hashed API key from Redis (per-day 8 units)");
   const key = generateApiKey();

@@ -4,7 +4,7 @@
 
 Security hardening (audit 2026-10-20).
 
-- **Quotas (C1):** cost-weighted per-IP and per-API-key limits on the HTTP endpoint (anonymous 30 units/min, 300/day; free key 120/min, 5,000/day), with `RATE_LIMITED` errors carrying `retry_after_seconds` and a key-request hint. Hashed API keys in Redis (`scripts/create-key.ts`), durable per-day usage counters. JSON-RPC batches rejected; insider fan-out capped at 20 filings, entity lookups at 5 states.
+- **Quotas (C1):** cost-weighted per-IP and per-API-key limits on the HTTP endpoint (anonymous 30 units/min and 300/day per IP plus 3,000/day per /24 network against IP rotation; free key 120/min, 5,000/day), with `RATE_LIMITED` errors carrying `retry_after_seconds` and a key-request hint. Hashed API keys in Redis (`scripts/create-key.ts`), durable per-day usage counters. JSON-RPC batches rejected; insider fan-out capped at 20 filings, entity lookups at 5 states.
 - **SEC limiter (C2):** two-stage limiter (local spacing + atomic Upstash token bucket, default 6 rps, max 8) that fails closed; also applied to state portals. Raw documents are no longer stored in Redis; cache keys are normalized.
 - **SSRF / size (H1, L2):** strict EDGAR Archives URL validation, 15 MB streaming cap, manual redirects with host re-check.
 - **Privacy (H3):** individual registered agents withheld unless `include_agent_details: true`; suppression list (`scripts/suppress.ts`); NY service-of-process field.

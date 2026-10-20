@@ -161,6 +161,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `SOCRATA_APP_TOKEN` | – | App token for the state portals (higher throttling limits; free at each portal's developer settings) |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | – | Enables Redis (Vercel's `KV_REST_API_URL`/`KV_REST_API_TOKEN` also work). Without them cache and quotas are in-memory. |
 | `QUOTA_ANON_PER_MINUTE` / `QUOTA_ANON_PER_DAY` | `30` / `300` | HTTP quota for anonymous clients, in units, per hashed IP |
+| `QUOTA_ANON_NETWORK_PER_DAY` | `3000` | Shared daily cap for all anonymous clients in one /24 (IPv6 /48), against address rotation |
 | `QUOTA_KEY_PER_MINUTE` / `QUOTA_KEY_PER_DAY` | `120` / `5000` | HTTP quota per API key (per-key overrides via `scripts/create-key.ts`) |
 | `MCP_API_KEYS` | – | Comma-separated static keys (accepted alongside hashed keys stored in Redis) |
 | `MCP_REQUIRE_API_KEY` | – | `1` rejects anonymous HTTP calls with 401 (0.1.x required a key whenever `MCP_API_KEYS` was set) |
@@ -191,6 +192,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | Client | Per minute | Per day (UTC) |
 |---|---|---|
 | Anonymous (per IP, IPv6 per /64) | 30 | 300 |
+| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 3,000 |
 | Free API key | 120 | 5,000 |
 
 Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the limit, and how to get a key. Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Operators mint them with `npx tsx scripts/create-key.ts --name "<owner + contact>"` (only the SHA-256 is stored) and revoke with `--revoke`. Running locally via `npx -y edgar-entity-mcp` has no quota.

@@ -288,3 +288,20 @@ describe("L1: log redaction", () => {
     expect(out).not.toMatch(/hunter2|abc\.def|xyz|u:p@|a{32}/);
   });
 });
+
+describe("C1: network-level daily cap (IP rotation)", () => {
+  it("groups rotating IPv4 addresses in one /24 and IPv6 in one /48", () => {
+    expect(ipPrincipal("140.248.52.10").network).toBe(ipPrincipal("140.248.52.120").network);
+    expect(ipPrincipal("140.248.52.10").id).not.toBe(ipPrincipal("140.248.52.120").id);
+    expect(ipPrincipal("140.248.53.10").network).not.toBe(ipPrincipal("140.248.52.10").network);
+    expect(ipPrincipal("2001:db8:1:2::1").network).toBe(ipPrincipal("2001:db8:1:ffff::9").network);
+  });
+  it("refuses once the network's shared daily budget is spent, even from fresh IPs", async () => {
+    const store = new MemoryQuotaStore();
+    const limits = { perMinute: 100, perDay: 100, networkPerDay: 10 };
+    for (let i = 1; i <= 5; i++) expect((await store.consume(ipPrincipal(`10.1.2.${i}`), 2, limits, "t")).ok).toBe(true);
+    const d = await store.consume(ipPrincipal("10.1.2.99"), 2, limits, "t");
+    expect(d).toMatchObject({ ok: false, scope: "network", limit: 10 });
+    expect((await store.consume(ipPrincipal("10.1.3.1"), 2, limits, "t")).ok).toBe(true);
+  });
+});

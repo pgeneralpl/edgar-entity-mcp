@@ -93,14 +93,24 @@ export function clientIp(req: Request): string {
   return xff || "unknown";
 }
 
-/** Hash an IP (IPv6 grouped by /64) so raw addresses never reach Redis or logs. */
+/**
+ * Hash an IP (IPv6 grouped by /64) so raw addresses never reach Redis or logs. `network` is the
+ * hashed enclosing IPv4 /24 or IPv6 /48, used for a coarser daily cap against address rotation.
+ */
 export function ipPrincipal(ip: string): Principal {
   let norm = ip.toLowerCase();
+  let net: string;
   if (norm.includes(":") && !/^::ffff:\d/.test(norm)) {
     const full = expandIpv6(norm);
+    net = full ? full.slice(0, 3).join(":") + "::/48" : norm;
     norm = full ? full.slice(0, 4).join(":") + "::/64" : norm;
-  } else norm = norm.replace(/^::ffff:/, "");
-  return { id: `ip:${sha256(config().ipHashSalt + "|" + norm).slice(0, 20)}`, tier: "anon" };
+  } else {
+    norm = norm.replace(/^::ffff:/, "");
+    const o = norm.split(".");
+    net = o.length === 4 ? `${o[0]}.${o[1]}.${o[2]}.0/24` : norm;
+  }
+  const h = (v: string) => sha256(config().ipHashSalt + "|" + v).slice(0, 20);
+  return { id: `ip:${h(norm)}`, tier: "anon", network: `net:${h(net)}` };
 }
 
 function expandIpv6(ip: string): string[] | undefined {
