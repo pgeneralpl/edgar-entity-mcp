@@ -3,7 +3,21 @@
   "buildCommand": "npm run build",
   "outputDirectory": "public",
   "functions": {
-    "api/mcp.ts": { "maxDuration": 60, "memory": 1024 }
+    "api/mcp.ts": {
+      "maxDuration": 60
+    },
+    "api/health.ts": {
+      "maxDuration": 10
+    }
   },
-  "rewrites": [{ "source": "/mcp", "destination": "/api/mcp" }]
+  "rewrites": [
+    {
+      "source": "/mcp",
+      "destination": "/api/mcp"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/health"
+    }
+  ]
 }

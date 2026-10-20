@@ -1,15 +1,15 @@
 # Launch kit: edgar-entity-mcp
 
-Repo: https://github.com/pgeneralpl/edgar-entity-mcp. Replace the remote URL placeholder `https://edgar-entity-mcp.vercel.app/mcp` once the server is deployed.
+Repo: https://github.com/pgeneralpl/edgar-entity-mcp · Live endpoint: `https://edgar-entity-mcp.vercel.app/mcp` (health: https://edgar-entity-mcp.vercel.app/health)
 
 ## Pre-launch checklist (owner)
 
 1. ~~`gh repo create pgeneralpl/edgar-entity-mcp --public --source . --push`~~ (done)
 2. ~~Set owner `pgeneralpl` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file~~ (done)
 3. `npm login && npm publish --access public`. The name `edgar-entity-mcp` was available on 2026-10-20.
-4. Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`. Add the Upstash integration so the cache and rate budget are shared.
+4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`). Still open: accept the Upstash marketplace terms in the Vercel dashboard, then add the free Upstash Redis store (`vercel integration add upstash/upstash-kv --plan free -m primaryRegion=iad1 -m autoUpgrade=false`) so the cache and rate budget are shared; and install the Vercel GitHub App on the repo for push-to-deploy.
 5. MCP Registry: `mcp-publisher login github && mcp-publisher publish`. This uses `server.json`; the npm ownership check needs `mcpName` in the published package.json.
-6. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → the `/mcp` URL. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
+6. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → `https://edgar-entity-mcp.vercel.app/mcp`. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
 
 ---
 
@@ -72,7 +72,7 @@ The data is free, official and commercially usable. 🧵
 
 5/ It plays nice with SEC: declared User-Agent, a global ~8 req/s limiter, backoff on 429/503, and caching (Upstash or in-memory). Responses are compact JSON with source URLs, so agents cite instead of hallucinating.
 
-6/ Works in Claude Desktop, Cursor, Claude Code and VS Code via stdio, or remotely over Streamable HTTP (Vercel). MIT licensed.
+6/ Works in Claude Desktop, Cursor, Claude Code and VS Code via stdio, or remotely over Streamable HTTP: https://edgar-entity-mcp.vercel.app/mcp. MIT licensed.
 
 Repo: github.com/pgeneralpl/edgar-entity-mcp
 Feedback and state requests welcome 🙏

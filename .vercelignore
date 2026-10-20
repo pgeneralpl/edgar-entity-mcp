@@ -1,0 +1,9 @@
+node_modules
+dist
+scratch
+smoke-output
+coverage
+*.tgz
+.env*
+!.env.example
+.github

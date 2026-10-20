@@ -10,3 +10,5 @@ coverage
 smoke-output
 scratch
 *.tgz
+.env*
+!.env.example

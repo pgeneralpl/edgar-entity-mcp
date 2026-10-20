@@ -67,7 +67,8 @@
     "check": "npm run typecheck && npm run lint && npm test",
     "prepublishOnly": "npm run check && npm run build",
     "validate:registry": "tsx scripts/validate-server-json.ts",
-    "gen": "tsx scripts/gen-artifacts.ts"
+    "gen": "tsx scripts/gen-artifacts.ts",
+    "smoke:remote": "tsx scripts/e2e-remote.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",

@@ -46,3 +46,6 @@ jobs:
         if: steps.ua.outputs.has_ua == 'true'
       - run: npm run smoke:e2e
         if: steps.ua.outputs.has_ua == 'true'
+      - name: Live check of the hosted endpoint
+        run: npm run smoke:remote -- https://edgar-entity-mcp.vercel.app/mcp
+        if: steps.ua.outputs.has_ua == 'true'

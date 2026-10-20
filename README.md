@@ -121,7 +121,7 @@ Other quick examples:
 
 ### Remote (Streamable HTTP)
 
-Hosted URL: `https://edgar-entity-mcp.vercel.app/mcp` (this is a placeholder until the server is deployed).
+Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
@@ -136,7 +136,7 @@ npm run build && PORT=3000 SEC_USER_AGENT="Acme you@acme.com" npm run start:http
 
 ### Deploy to Vercel
 
-The repo already contains `api/mcp.ts` (a Vercel Function with a Web-standard handler built on [`mcp-handler`](https://www.npmjs.com/package/mcp-handler)) and `vercel.json`, which runs `npm run build` and rewrites `/mcp` to `/api/mcp`.
+The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions with a Web-standard handler built on [`mcp-handler`](https://www.npmjs.com/package/mcp-handler)) and `vercel.json`, which runs `npm run build` and rewrites `/mcp` to `/api/mcp` and `/health` to `/api/health`. `npm run smoke:remote -- https://<project>.vercel.app/mcp` runs a live check against a deployment.
 
 1. `vercel link` then `vercel env add SEC_USER_AGENT` (and optionally the Upstash / `MCP_API_KEYS` variables).
 2. Recommended: add the **Upstash Redis** integration. The cache is then shared across instances, and the SEC rate budget becomes fleet-wide rather than per instance.

@@ -5,6 +5,12 @@
     "version": "0.1.0",
     "websiteUrl": "https://github.com/pgeneralpl/edgar-entity-mcp"
   },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://edgar-entity-mcp.vercel.app/mcp"
+    }
+  ],
   "authentication": {
     "required": false
   },
