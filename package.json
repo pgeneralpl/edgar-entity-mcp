@@ -72,7 +72,6 @@
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
     "@upstash/redis": "^1.39.0",
-    "esbuild": "^0.28.2",
     "fast-xml-parser": "^5.11.2",
     "html-to-text": "^10.0.1",
     "lru-cache": "^11.5.3",

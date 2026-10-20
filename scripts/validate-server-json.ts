@@ -1,6 +1,11 @@
 /** Validates server.json against the official MCP Registry schema referenced in its $schema. */
 import { readFileSync } from "node:fs";
-import Ajv from "ajv";
+import AjvModule from "ajv";
+
+// ajv ships CJS; under NodeNext the constructor lives on .default.
+const Ajv = ((AjvModule as unknown as { default?: typeof AjvModule }).default ?? AjvModule) as unknown as new (
+  opts: Record<string, unknown>,
+) => import("ajv").default;
 
 const sj = JSON.parse(readFileSync("server.json", "utf8"));
 const schema = (await (await fetch(sj.$schema)).json()) as Record<string, unknown>;

@@ -9,3 +9,4 @@ coverage
 .DS_Store
 smoke-output
 scratch
+*.tgz
