@@ -80,12 +80,10 @@ try {
   const over = await tool("search_company", { query: "AAPL", limit: 1 }, { ...k, ...ipA });
   check(over.limited && over.text.includes("day"), "key: 9th call RATE_LIMITED (daily)");
   const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const keyPrincipal = `key:${hash.slice(0, 16)}`;
   const scan = await redis.scan(0, { match: `${c.cachePrefix}u:*${day}`, count: 1000 });
   check(scan[1].length >= 2, `durable usage hashes written (${scan[1].length})`);
   const ttls = await Promise.all(scan[1].map((x) => redis.ttl(x)));
   check(ttls.every((t) => t > 0 && t <= 35 * 86400), `usage counters have TTLs (${ttls.join(", ")}s)`);
-  void keyPrincipal;
   const bad = await tool("search_company", { query: "AAPL" }, { authorization: "Bearer eem_" + "x".repeat(32) });
   check(bad.status === 401, `unknown key -> 401 (${bad.status})`);
   await revokeApiKey(redis, key);
@@ -106,10 +104,9 @@ try {
   const err = await lim2.acquire().then(() => null, (e: { code?: string }) => e);
   check(err?.code === "RATE_LIMITED", `limiter with unreachable/unauthorized Redis refuses (code ${err?.code})`);
 } finally {
-  let cursor = "0";
   let deleted = 0;
   for (const pattern of [`eem:livetest-${run}:*`, `eem:rl*livetest-${run}*`]) {
-    cursor = "0";
+    let cursor = "0";
     do {
       const [next, keys] = await redis.scan(cursor, { match: pattern, count: 1000 });
       cursor = String(next);
