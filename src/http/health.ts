@@ -22,6 +22,8 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
     quotas: {
       anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay, units_per_day_per_network: c.quota.anonNetworkPerDay },
       api_key: { units_per_minute: c.quota.keyPerMinute, units_per_day: c.quota.keyPerDay },
+      // What rate limiting stores: integer counters under daily-rotating hashed ids, TTL = window.
+      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, day_counter_ttl_hours: 25, minute_counter_ttl_seconds: 60 },
     },
     sec_user_agent_configured: c.secUserAgentValid,
     auth_required: c.requireApiKey,

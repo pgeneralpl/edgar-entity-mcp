@@ -1,10 +1,10 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Redis } from "@upstash/redis";
 import { LRUCache } from "lru-cache";
 import { config } from "../config.js";
 import { getRedis } from "./cache.js";
 import { logError } from "./errors.js";
-import type { Principal } from "./quota.js";
+import { utcDay, type Principal } from "./quota.js";
 
 /** Free API keys look like `eem_` + 32 base62 chars. Only their SHA-256 is stored. */
 export const KEY_RE = /^eem_[A-Za-z0-9]{32}$/;
@@ -93,11 +93,32 @@ export function clientIp(req: Request): string {
   return xff || "unknown";
 }
 
+const saltMemo = new Map<string, string>();
 /**
- * Hash an IP (IPv6 grouped by /64) so raw addresses never reach Redis or logs. `network` is the
- * hashed enclosing IPv4 /24 or IPv6 /48, used for a coarser daily cap against address rotation.
+ * Salt for one UTC day: HMAC-SHA256(IP_HASH_SALT, "YYYYMMDD"). Hashes from different days cannot
+ * be linked, and nothing that would allow re-identification survives the day it was created on.
  */
-export function ipPrincipal(ip: string): Principal {
+export function daySalt(day: string): string {
+  let s = saltMemo.get(day);
+  if (!s) {
+    s = createHmac("sha256", config().ipHashSecret).update(day).digest("hex");
+    if (saltMemo.size > 4) saltMemo.clear();
+    saltMemo.set(day, s);
+  }
+  return s;
+}
+export function clearSaltMemo(): void {
+  saltMemo.clear();
+}
+
+/**
+ * Hash an IP (IPv6 grouped by /64) with the salt of the current UTC day, so raw addresses never
+ * reach Redis or logs and hashes rotate daily. `network` is the hashed enclosing IPv4 /24 or
+ * IPv6 /48, used for a coarser daily cap against address rotation. `day` is fixed here, once per
+ * request, and the quota store uses the same day for its counter keys, so a request that straddles
+ * UTC midnight is hashed and counted consistently against one day.
+ */
+export function ipPrincipal(ip: string, day: string = utcDay()): Principal {
   let norm = ip.toLowerCase();
   let net: string;
   if (norm.includes(":") && !/^::ffff:\d/.test(norm)) {
@@ -109,8 +130,9 @@ export function ipPrincipal(ip: string): Principal {
     const o = norm.split(".");
     net = o.length === 4 ? `${o[0]}.${o[1]}.${o[2]}.0/24` : norm;
   }
-  const h = (v: string) => sha256(config().ipHashSalt + "|" + v).slice(0, 20);
-  return { id: `ip:${h(norm)}`, tier: "anon", network: `net:${h(net)}` };
+  const salt = daySalt(day);
+  const h = (v: string) => createHmac("sha256", salt).update(v).digest("hex").slice(0, 20);
+  return { id: `ip:${h(norm)}`, tier: "anon", network: `net:${h(net)}`, day };
 }
 
 function expandIpv6(ip: string): string[] | undefined {

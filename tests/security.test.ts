@@ -106,7 +106,6 @@ describe("C1: cost-weighted quotas", () => {
     // API keys get their own, higher budget
     const k: Principal = { id: "key:abc", tier: "key" };
     await expect(chargeQuota(k, "search_company", {}, store)).resolves.toBeUndefined();
-    expect(store.usage.get(`${p.id}:20261020`)).toMatchObject({ lookup_business_entity: 3, units: 15 });
   });
   it("fails closed when the quota backend errors", async () => {
     const broken: QuotaStore = { consume: async () => { throw new Error("redis down"); } };
@@ -299,9 +298,9 @@ describe("C1: network-level daily cap (IP rotation)", () => {
   it("refuses once the network's shared daily budget is spent, even from fresh IPs", async () => {
     const store = new MemoryQuotaStore();
     const limits = { perMinute: 100, perDay: 100, networkPerDay: 10 };
-    for (let i = 1; i <= 5; i++) expect((await store.consume(ipPrincipal(`10.1.2.${i}`), 2, limits, "t")).ok).toBe(true);
-    const d = await store.consume(ipPrincipal("10.1.2.99"), 2, limits, "t");
+    for (let i = 1; i <= 5; i++) expect((await store.consume(ipPrincipal(`10.1.2.${i}`), 2, limits)).ok).toBe(true);
+    const d = await store.consume(ipPrincipal("10.1.2.99"), 2, limits);
     expect(d).toMatchObject({ ok: false, scope: "network", limit: 10 });
-    expect((await store.consume(ipPrincipal("10.1.3.1"), 2, limits, "t")).ok).toBe(true);
+    expect((await store.consume(ipPrincipal("10.1.3.1"), 2, limits)).ok).toBe(true);
   });
 });

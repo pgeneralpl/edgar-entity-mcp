@@ -166,7 +166,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `MCP_API_KEYS` | – | Comma-separated static keys (accepted alongside hashed keys stored in Redis) |
 | `MCP_REQUIRE_API_KEY` | – | `1` rejects anonymous HTTP calls with 401 (0.1.x required a key whenever `MCP_API_KEYS` was set) |
 | `KEY_REQUEST_URL` | GitHub issue link | Shown in RATE_LIMITED hints as the place to request a free key |
-| `IP_HASH_SALT` | built-in | Salt for hashing client IPs before they are used as quota keys. Set a random value in production. |
+| `IP_HASH_SALT` | derived from the Upstash token | Secret for the IP hash. The salt actually used is `HMAC-SHA256(IP_HASH_SALT, UTC date)`, so it rotates daily. Set a random value (≥32 chars) in production. |
 | `HEALTH_SECRET` | – | Enables `/health?deep=1` (Redis ping) for requests sending `x-health-secret: <value>` |
 | `SUPPRESSION_FILE` | – | JSON array of suppression entries (see [Privacy](#privacy-and-personal-data)) |
 | `MAX_BODY_BYTES` / `MAX_DOCUMENT_BYTES` | 65536 / 15 MB | HTTP request body cap / max filing document size |
@@ -195,7 +195,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 3,000 |
 | Free API key | 120 | 5,000 |
 
-Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the limit, and how to get a key. Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Operators mint them with `npx tsx scripts/create-key.ts --name "<owner + contact>"` (only the SHA-256 is stored) and revoke with `--revoke`. Running locally via `npx -y edgar-entity-mcp` has no quota.
+Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the limit, and how to get a key. Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Operators mint them with `npx tsx scripts/create-key.ts --label gh-issue-42` (only the SHA-256 of the key, the label, the creation date and any per-key limits are stored; the label should be a reference, not a name or email) and revoke with `--revoke`. Running locally via `npx -y edgar-entity-mcp` has no quota.
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 
@@ -204,7 +204,23 @@ Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (on
 - Registered agents that are individuals (natural persons) are returned as `{ "kind": "individual", "withheld": true }` unless the caller sets `include_agent_details: true`. Organizational agents are always shown.
 - Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Suppressed data is never returned.
 - Form 4 reporting-owner names are statutory public disclosures and are returned by `get_insider_trades`.
-- **Logs and retention**: the hosted server logs errors and (with `USAGE_LOG=1`) per-call usage to stderr, which lands in Vercel runtime logs and expires under Vercel's plan retention (short on Hobby; see [Vercel log limits](https://vercel.com/docs/logs/runtime#limits)). Logs never contain tool arguments, API keys or raw IPs. Quota/usage counters in Redis are keyed by a salted IP hash or key hash: per-IP counters expire after 2 days, per-key counters after 35 days.
+
+### What the hosted server stores, and for how long
+
+Rate limiting keeps **only integer counters** in Redis, under hashed identifiers, with a TTL equal to the window being enforced:
+
+| Redis key | Value | TTL |
+|---|---|---|
+| `eem:v1:q:m:ip:<hash>:<minute>` / `…:q:m:key:<hash>:<minute>` | units used this minute | 60 s (the window) |
+| `eem:v1:q:d:ip:<hash>:<YYYYMMDD>` | units used today (UTC) by one IP (IPv6: /64) | 25 h (the day + 1 h slack) |
+| `eem:v1:q:d:net:<hash>:<YYYYMMDD>` | units used today by all anonymous clients of one /24 (IPv6: /48) | 25 h |
+| `eem:v1:q:d:key:<hash>:<YYYYMMDD>` | units used today by one API key | 25 h |
+
+- `<hash>` for IPs is `HMAC-SHA256(daily salt, IP or prefix)` truncated to 80 bits, where the daily salt is `HMAC-SHA256(IP_HASH_SALT, YYYYMMDD)`. Hashes from different days can't be linked, and once a day's counters expire nothing derived from that day's IPs is left. A request is hashed and counted against the same UTC day, so requests that straddle midnight are counted consistently. The per-minute counter for an IP restarts at midnight because its hash changes, so a client can get at most one extra minute's worth of quota at that moment.
+- For keys, `<hash>` is a prefix of the key's SHA-256. API key records (`eem:v1:apikey:<sha256>`) hold the label, the creation date and optional per-key limits, with no expiry until revoked. The suppression set (`eem:v1:suppress`) holds erasure-request entries.
+- Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries for public SEC and state data are stored under `eem:v1:c:<sha256 of the upstream request>`, so key names don't reveal what was searched. The upstream fan-out budget (`eem:rl:*`) is a global token bucket with no per-client data.
+- **Logs**: errors (and, with `USAGE_LOG=1`, one line per call with tool name, latency, outcome, response size and the daily-rotating principal hash) go to stderr, then to Vercel runtime logs, which expire under Vercel's plan retention ([limits](https://vercel.com/docs/logs/runtime#limits)). Error text has URL query strings, IP addresses, email addresses and credential-like values masked. Tool arguments, API keys and raw IPs are never logged by this server. Vercel's own platform request logs (outside this code) record request metadata such as path and client IP under Vercel's retention.
+- `/health` reports this configuration under `quotas.state`.
 
 ## Security notes
 

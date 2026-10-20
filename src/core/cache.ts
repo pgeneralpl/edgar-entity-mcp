@@ -1,4 +1,5 @@
 import { LRUCache } from "lru-cache";
+import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { config } from "../config.js";
 
@@ -34,6 +35,14 @@ export class MemoryCache implements Cache {
   }
 }
 
+/**
+ * Redis key for a cache entry: the logical key (which contains upstream URLs and therefore tool
+ * arguments such as searched names) is hashed, so Redis key names never reveal what was asked.
+ */
+export function redisCacheKey(key: string): string {
+  return `${config().cachePrefix}c:${createHash("sha256").update(key).digest("hex").slice(0, 40)}`;
+}
+
 export class UpstashCache implements Cache {
   readonly kind = "upstash";
   constructor(
@@ -42,7 +51,7 @@ export class UpstashCache implements Cache {
   ) {}
   async get(key: string) {
     try {
-      const v = await this.redis.get<string>(key);
+      const v = await this.redis.get<string>(redisCacheKey(key));
       return v ?? undefined;
     } catch {
       return undefined; // cache failures must never break tools
@@ -51,7 +60,7 @@ export class UpstashCache implements Cache {
   async set(key: string, value: string, ttlSeconds: number) {
     if (value.length > this.maxValueBytes) return;
     try {
-      await this.redis.set(key, value, { ex: Math.max(1, Math.round(ttlSeconds)) });
+      await this.redis.set(redisCacheKey(key), value, { ex: Math.max(1, Math.round(ttlSeconds)) });
     } catch {
       /* ignore */
     }

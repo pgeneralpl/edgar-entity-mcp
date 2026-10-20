@@ -77,7 +77,7 @@ try {
 
   console.log("Hashed API key from Redis (per-day 8 units)");
   const key = generateApiKey();
-  const hash = await storeApiKey(redis, key, { name: "live-test", created: new Date().toISOString() });
+  const hash = await storeApiKey(redis, key, { name: "live-test", created: new Date().toISOString().slice(0, 10) });
   const stored = await redis.get<string>(`${c.cachePrefix}apikey:${hash}`);
   check(stored && !String(stored).includes(key) && hash === sha256(key), "only the hash/record is stored");
   const k = { authorization: `Bearer ${key}` };
@@ -86,11 +86,31 @@ try {
   check(rk.every((x) => !x), "key: 8 calls allowed even though the IP is over its anonymous quota");
   const over = await tool("search_company", { query: "AAPL", limit: 1 }, { ...k, ...ipA });
   check(over.limited && over.text.includes("day"), "key: 9th call RATE_LIMITED (daily)");
-  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
-  const scan = await redis.scan(0, { match: `${c.cachePrefix}u:*${day}`, count: 1000 });
-  check(scan[1].length >= 2, `durable usage hashes written (${scan[1].length})`);
-  const ttls = await Promise.all(scan[1].map((x) => redis.ttl(x)));
-  check(ttls.every((t) => t > 0 && t <= 35 * 86400), `usage counters have TTLs (${ttls.join(", ")}s)`);
+  console.log("Stored state: only integer counters under hashed ids, TTL = window");
+  const all: string[] = [];
+  let cur = "0";
+  do {
+    const [next, ks] = await redis.scan(cur, { match: `${c.cachePrefix}*`, count: 1000 });
+    cur = String(next);
+    all.push(...ks);
+  } while (cur !== "0");
+  const quotaKeys = all.filter((k) => k.includes(":q:"));
+  check(!all.some((k) => k.includes(":u:")), "no usage hashes");
+  check(quotaKeys.every((k) => /:q:[dm]:(ip|net|key):[0-9a-f]+:\d+$/.test(k)), `${quotaKeys.length} quota keys, all hashed id + window`);
+  const values = await Promise.all(quotaKeys.map((k) => redis.get<string>(k)));
+  check(values.every((v) => /^\d+$/.test(String(v))), "all quota values are integers");
+  const ttlOf = await Promise.all(quotaKeys.map(async (k) => [k, await redis.ttl(k)] as const));
+  const dayT = ttlOf.filter(([k]) => k.includes(":q:d:")).map(([, t]) => t);
+  const minT = ttlOf.filter(([k]) => k.includes(":q:m:")).map(([, t]) => t);
+  check(dayT.length > 0 && dayT.every((t) => t > 0 && t <= 25 * 3600), `daily counters TTL <= 25 h (max ${Math.max(...dayT)} s)`);
+  check(minT.every((t) => t > 0 && t <= 120), `minute counters TTL <= 2 min (max ${Math.max(0, ...minT)} s)`);
+  const dump = JSON.stringify(all) + JSON.stringify(values) + JSON.stringify(await Promise.all(all.filter((k) => !k.includes(":q:")).map((k) => redis.get<string>(k))));
+  const rawIps = [ipA["x-real-ip"], ipB["x-real-ip"], "198.51.100.", "203.0.113.", "192.0.2.1"];
+  check(!rawIps.some((ip) => dump.includes(ip)), "no raw IP anywhere in keys or values");
+  const other = all.filter((k) => !k.includes(":q:") && !k.includes(":apikey:"));
+  check(other.every((k) => /:c:[0-9a-f]{40}$/.test(k)), `${other.length} cache keys, all hashed (no URLs or tool arguments in key names)`);
+  const { ipPrincipal } = await import("../src/core/apiKeys.js");
+  check(ipPrincipal("198.51.100.7", "20261020").id !== ipPrincipal("198.51.100.7", "20261021").id, "IP hash salt rotates daily");
   const bad = await tool("search_company", { query: "AAPL" }, { authorization: "Bearer eem_" + "x".repeat(32) });
   check(bad.status === 401, `unknown key -> 401 (${bad.status})`);
   await revokeApiKey(redis, key);

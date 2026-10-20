@@ -32,6 +32,7 @@ function build(): string {
     "- **PA officer names** are dropped (the source is row-per-officer; rows are de-duplicated without names).",
     "- **SEC Form 4 insiders**: get_insider_trades returns reporting owners' names, roles and transactions. These are statutory public disclosures (Section 16, Securities Exchange Act) and are needed for the tool's purpose.",
     "- **Erasure / objection requests**: operators can suppress an entity's personal fields (`entity:<STATE>:<id>`) or an agent name (`agent:<name>`) via the built-in list (src/states/suppression-list.ts), a JSON file (SUPPRESSION_FILE) or the Redis set managed with `scripts/suppress.ts`. Suppressed data is never returned, even with include_agent_details.",
+    "- **Hosted rate-limit state**: only integer counters keyed by a daily-rotating HMAC of the client IP (or the API key hash), with TTL equal to the enforced window (60 s per minute, 25 h per day). No raw IPs, user agents, paths or tool arguments are stored in Redis or written to logs. See README > What the hosted server stores.",
     "- Do not use registry data for FCRA-regulated decisions (credit, employment, tenancy, insurance) or other purposes prohibited by the source portals.",
     "",
   );

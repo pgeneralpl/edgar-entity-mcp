@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Ratelimit } from "@upstash/ratelimit";
 import type { Redis } from "@upstash/redis";
 import { config } from "../config.js";
@@ -19,6 +20,8 @@ export interface Principal {
   perMinute?: number;
   /** Hashed enclosing network (IPv4 /24, IPv6 /48) for anonymous clients. */
   network?: string;
+  /** UTC day (YYYYMMDD) the ids were derived for; daily counters use the same day. */
+  day?: string;
 }
 
 export interface Limits {
@@ -37,7 +40,7 @@ export interface QuotaDecision {
 }
 
 export interface QuotaStore {
-  consume(p: Principal, cost: number, limits: Limits, tool: string): Promise<QuotaDecision>;
+  consume(p: Principal, cost: number, limits: Limits): Promise<QuotaDecision>;
 }
 
 const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) ? v : d);
@@ -77,7 +80,11 @@ export function limitsFor(p: Principal): Limits {
   return { perMinute: q.anonPerMinute, perDay: q.anonPerDay, networkPerDay: q.anonNetworkPerDay };
 }
 
-const DAY_TTL: Record<Tier, number> = { anon: 2 * 86400, key: 35 * 86400 };
+/**
+ * Retention = enforced window. Daily counters live 25 h (the UTC day + 1 h slack for clock skew),
+ * per-minute counters 60 s (set by @upstash/ratelimit's fixed window). Nothing else is stored.
+ */
+export const DAY_COUNTER_TTL_SECONDS = 25 * 3600;
 
 export function utcDay(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10).replace(/-/g, "");
@@ -91,54 +98,53 @@ export function secondsToUtcMidnight(now = Date.now()): number {
 export class MemoryQuotaStore implements QuotaStore {
   private minute = new Map<string, { window: number; used: number }>();
   private day = new Map<string, number>();
-  readonly usage = new Map<string, Record<string, number>>();
+  private currentDay = "";
   constructor(private now: () => number = Date.now) {}
-  async consume(p: Principal, cost: number, l: Limits, tool: string): Promise<QuotaDecision> {
+  async consume(p: Principal, cost: number, l: Limits): Promise<QuotaDecision> {
     const t = this.now();
+    const today = p.day ?? utcDay(t);
+    if (today > this.currentDay) {
+      this.day.clear(); // keep only the current daily window
+      this.currentDay = today;
+    }
+    if (this.minute.size > 10_000) for (const [k, v] of this.minute) if (v.window < Math.floor(t / 60_000)) this.minute.delete(k);
     const w = Math.floor(t / 60_000);
     const m = this.minute.get(p.id);
     const mUsed = m && m.window === w ? m.used : 0;
     if (mUsed + cost > l.perMinute) return { ok: false, scope: "minute", limit: l.perMinute, remaining: Math.max(0, l.perMinute - mUsed), retryAfterSeconds: Math.max(1, Math.ceil(((w + 1) * 60_000 - t) / 1000)) };
-    const dk = `${p.id}:${utcDay(t)}`;
+    const dk = `${p.id}:${today}`;
     const dUsed = this.day.get(dk) ?? 0;
     if (dUsed + cost > l.perDay) return { ok: false, scope: "day", limit: l.perDay, remaining: Math.max(0, l.perDay - dUsed), retryAfterSeconds: secondsToUtcMidnight(t) };
-    const nk = p.network && l.networkPerDay ? `${p.network}:${utcDay(t)}` : undefined;
+    const nk = p.network && l.networkPerDay ? `${p.network}:${today}` : undefined;
     const nUsed = nk ? (this.day.get(nk) ?? 0) : 0;
     if (nk && nUsed + cost > l.networkPerDay!)
       return { ok: false, scope: "network", limit: l.networkPerDay, remaining: Math.max(0, l.networkPerDay! - nUsed), retryAfterSeconds: secondsToUtcMidnight(t) };
     this.minute.set(p.id, { window: w, used: mUsed + cost });
     this.day.set(dk, dUsed + cost);
     if (nk) this.day.set(nk, nUsed + cost);
-    const u = this.usage.get(dk) ?? {};
-    u[tool] = (u[tool] ?? 0) + 1;
-    u.units = (u.units ?? 0) + cost;
-    this.usage.set(dk, u);
     return { ok: true, limit: l.perDay, remaining: l.perDay - dUsed - cost };
   }
 }
 
 /**
- * Atomic daily quota + durable usage counters in ONE Redis command:
- * check used+cost <= limit (and the network's shared cap for anonymous clients), INCRBY, set TTL on
- * first use, HINCRBY per-tool calls and units.
+ * Atomic daily quota in ONE Redis command: check the principal's counter (KEYS[1]) and, for
+ * anonymous clients, the network's shared counter (KEYS[2]); INCRBY both; set the TTL on first use.
+ * Only integers are stored; keys contain hashed ids and the day, nothing else.
  */
 const DAY_SCRIPT = `
-local used = tonumber(redis.call('GET', KEYS[1]) or '0')
 local cost = tonumber(ARGV[1])
 local limit = tonumber(ARGV[2])
+local ttl = tonumber(ARGV[3])
+local netlimit = tonumber(ARGV[4] or '0')
+local used = tonumber(redis.call('GET', KEYS[1]) or '0')
 if used + cost > limit then return {0, used} end
-local netlimit = tonumber(ARGV[5] or '0')
-if KEYS[3] and netlimit > 0 then
-  local nused = tonumber(redis.call('GET', KEYS[3]) or '0')
+if KEYS[2] and netlimit > 0 then
+  local nused = tonumber(redis.call('GET', KEYS[2]) or '0')
   if nused + cost > netlimit then return {2, nused} end
-  local nn = redis.call('INCRBY', KEYS[3], cost)
-  if nn == cost then redis.call('EXPIRE', KEYS[3], tonumber(ARGV[3])) end
+  if redis.call('INCRBY', KEYS[2], cost) == cost then redis.call('EXPIRE', KEYS[2], ttl) end
 end
 local n = redis.call('INCRBY', KEYS[1], cost)
-if n == cost then redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3])) end
-redis.call('HINCRBY', KEYS[2], ARGV[4], 1)
-local u = redis.call('HINCRBY', KEYS[2], 'units', cost)
-if u == cost then redis.call('EXPIRE', KEYS[2], tonumber(ARGV[3])) end
+if n == cost then redis.call('EXPIRE', KEYS[1], ttl) end
 return {1, n}
 `;
 
@@ -149,12 +155,20 @@ return {1, n}
  */
 export class UpstashQuotaStore implements QuotaStore {
   private minuteLimiters = new Map<number, Ratelimit>();
-  private script: ReturnType<Redis["createScript"]>;
+  private static readonly SHA = createHash("sha1").update(DAY_SCRIPT).digest("hex");
   constructor(
     private redis: Redis,
     private prefix = config().cachePrefix,
   ) {
-    this.script = redis.createScript(DAY_SCRIPT);
+  }
+  /** EVALSHA with a synchronously computed SHA-1, falling back to EVAL once if the script is not cached. */
+  private async dayScript(keys: string[], args: string[]): Promise<unknown> {
+    try {
+      return await this.redis.evalsha(UpstashQuotaStore.SHA, keys, args);
+    } catch (e) {
+      if (!/NOSCRIPT/i.test(String(e))) throw e;
+      return await this.redis.eval(DAY_SCRIPT, keys, args);
+    }
   }
   private minuteLimiter(perMinute: number): Ratelimit {
     let rl = this.minuteLimiters.get(perMinute);
@@ -171,15 +185,16 @@ export class UpstashQuotaStore implements QuotaStore {
     }
     return rl;
   }
-  async consume(p: Principal, cost: number, l: Limits, tool: string): Promise<QuotaDecision> {
+  async consume(p: Principal, cost: number, l: Limits): Promise<QuotaDecision> {
     const m = await this.minuteLimiter(l.perMinute).limit(p.id, { rate: cost });
     if (!m.success || m.reason === "timeout")
       return { ok: false, scope: "minute", limit: l.perMinute, remaining: Math.max(0, m.remaining), retryAfterSeconds: Math.max(1, Math.ceil((m.reset - Date.now()) / 1000)) };
-    const day = utcDay();
+    const day = p.day ?? utcDay();
     const net = p.network && l.networkPerDay ? p.network : undefined;
-    const keys = [`${this.prefix}q:d:${p.id}:${day}`, `${this.prefix}u:${p.id}:${day}`];
+    const keys = [`${this.prefix}q:d:${p.id}:${day}`];
     if (net) keys.push(`${this.prefix}q:d:${net}:${day}`);
-    const [ok, used] = (await this.script.exec(keys, [String(cost), String(l.perDay), String(DAY_TTL[p.tier]), tool, String(net ? l.networkPerDay : 0)])) as [number, number];
+    const args = [String(cost), String(l.perDay), String(DAY_COUNTER_TTL_SECONDS), String(net ? l.networkPerDay : 0)];
+    const [ok, used] = (await this.dayScript(keys, args)) as [number, number];
     if (Number(ok) === 2)
       return { ok: false, scope: "network", limit: l.networkPerDay, remaining: Math.max(0, l.networkPerDay! - Number(used)), retryAfterSeconds: secondsToUtcMidnight() };
     if (Number(ok) !== 1) return { ok: false, scope: "day", limit: l.perDay, remaining: Math.max(0, l.perDay - Number(used)), retryAfterSeconds: secondsToUtcMidnight() };
@@ -216,13 +231,22 @@ export function rateLimitedError(p: Principal, d: QuotaDecision, cost: number): 
   });
 }
 
+/** A stuck quota backend must not hold requests open; it fails closed after this long. */
+export const QUOTA_TIMEOUT_MS = 3000;
+
 /** Charge a tool call to a principal; throws RATE_LIMITED when over quota or when the backend is unavailable (fail closed). */
 export async function chargeQuota(p: Principal, tool: string, args: unknown, s: QuotaStore = getQuotaStore()): Promise<void> {
   const cost = toolCost(tool, args);
   if (cost <= 0) return;
   let d: QuotaDecision;
   try {
-    d = await s.consume(p, cost, limitsFor(p), tool);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    d = await Promise.race([
+      s.consume(p, cost, limitsFor(p)),
+      new Promise<never>((_, rej) => {
+        timer = setTimeout(() => rej(new Error("quota backend timeout")), QUOTA_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
   } catch (e) {
     logError("quota", e);
     throw new ToolError("RATE_LIMITED", "Rate limiting is temporarily unavailable, so the call was refused.", "Retry in a few seconds.", { retry_after_seconds: 5, scope: "backend" });

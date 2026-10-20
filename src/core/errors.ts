@@ -42,11 +42,23 @@ export function redactSecrets(s: string): string {
     .replace(/(https?:\/\/)[^/\s:@]+:[^/\s@]+@/gi, "$1[redacted]@");
 }
 
+/**
+ * Remove personal or request-derived data before logging: URL query strings and fragments (they
+ * carry tool arguments such as searched names), IPv4/IPv6 addresses, and email addresses.
+ */
+export function redactPersonal(s: string): string {
+  return s
+    .replace(/(https?:\/\/[^\s"'?#]+)[?#][^\s"']*/gi, "$1?[redacted]")
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]")
+    .replace(/\b(?:[0-9a-f]{1,4}:){2,7}(?::|[0-9a-f]{1,4})(?::[0-9a-f]{1,4})*\b/gi, "[ip]")
+    .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, "[email]");
+}
+
 /** Log full error details server-side only (stderr → platform logs). Returns a short correlation id. */
 export function logError(context: string, err: unknown): string {
   const id = Math.random().toString(36).slice(2, 10);
   const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-  process.stderr.write(JSON.stringify({ type: "error", id, context, ts: new Date().toISOString(), detail: redactSecrets(detail).slice(0, 2000) }) + "\n");
+  process.stderr.write(JSON.stringify({ type: "error", id, context, ts: new Date().toISOString(), detail: redactPersonal(redactSecrets(detail)).slice(0, 2000) }) + "\n");
   return id;
 }
 

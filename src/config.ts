@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { PACKAGE_NAME, VERSION } from "./version.js";
 
 /** Runtime configuration, read lazily from the environment so tests can override it. */
@@ -21,7 +22,9 @@ export interface Config {
   requireApiKey: boolean;
   quota: { anonPerMinute: number; anonPerDay: number; anonNetworkPerDay: number; keyPerMinute: number; keyPerDay: number };
   /** Salt for hashing client IPs before they are used as Redis keys. */
-  ipHashSalt: string;
+  /** Secret for the daily-rotating IP hash salt (see core/apiKeys.ts daySalt). */
+  ipHashSecret: string;
+  ipHashSecretSource: "env" | "redis-token" | "builtin";
   /** Where users can request a free API key (shown in RATE_LIMITED hints). */
   keyRequestUrl: string;
   /** Shared secret for /health?deep=1 (header x-health-secret). Unset = deep checks disabled. */
@@ -74,13 +77,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       keyPerMinute: num(env.QUOTA_KEY_PER_MINUTE, 120),
       keyPerDay: num(env.QUOTA_KEY_PER_DAY, 5000),
     },
-    ipHashSalt: env.IP_HASH_SALT?.trim() || "edgar-entity-mcp",
+    ...ipHashSecret(env),
     keyRequestUrl: env.KEY_REQUEST_URL?.trim() || "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request",
     healthSecret: env.HEALTH_SECRET?.trim() || undefined,
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
     maxDocumentBytes: num(env.MAX_DOCUMENT_BYTES, 15 * 1024 * 1024),
     suppressionFile: env.SUPPRESSION_FILE?.trim() || undefined,
   };
+}
+
+/**
+ * IP_HASH_SALT if set; otherwise derived from the (secret) Upstash token so a fleet sharing one
+ * Redis still agrees on hashes; otherwise a built-in constant (memory-only self-hosting).
+ */
+function ipHashSecret(env: NodeJS.ProcessEnv): Pick<Config, "ipHashSecret" | "ipHashSecretSource"> {
+  const s = env.IP_HASH_SALT?.trim();
+  if (s) return { ipHashSecret: s, ipHashSecretSource: "env" };
+  const tok = (env.UPSTASH_REDIS_REST_TOKEN || env.KV_REST_API_TOKEN)?.trim();
+  if (tok) return { ipHashSecret: createHash("sha256").update("edgar-entity-mcp/ip-salt|" + tok).digest("hex"), ipHashSecretSource: "redis-token" };
+  return { ipHashSecret: "edgar-entity-mcp", ipHashSecretSource: "builtin" };
 }
 
 let cached: Config | undefined;
