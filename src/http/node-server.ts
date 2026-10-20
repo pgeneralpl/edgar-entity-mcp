@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Readable } from "node:stream";
 import { createHttpHandler } from "./handler.js";
 import { PACKAGE_NAME } from "../version.js";
-import { healthPayload } from "./health.js";
+import { healthResponse } from "./health.js";
 
 export function toWebRequest(req: IncomingMessage, origin: string): Request {
   const headers = new Headers();
@@ -45,8 +45,7 @@ export function startHttpServer(port = Number(process.env.PORT ?? 3000)) {
     try {
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (url.pathname === "/" || url.pathname === "/health") {
-        res.setHeader("content-type", "application/json");
-        return void res.end(JSON.stringify(healthPayload()));
+        return void (await sendWebResponse(res, await healthResponse(toWebRequest(req, url.origin))));
       }
       if (url.pathname !== "/mcp" && url.pathname !== "/api/mcp") {
         res.statusCode = 404;

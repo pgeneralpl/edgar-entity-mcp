@@ -12,3 +12,5 @@ scratch
 *.tgz
 .env*
 !.env.example
+.agents
+skills-lock.json

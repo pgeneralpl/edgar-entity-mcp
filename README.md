@@ -121,7 +121,7 @@ Other quick examples:
 
 ### Remote (Streamable HTTP)
 
-Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health
+Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health (add `?deep=1` for a Redis reachability check). The hosted instance uses Upstash Redis for a shared cache and a fleet-wide SEC budget of 8 req/s.
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
