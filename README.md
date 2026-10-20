@@ -1,8 +1,8 @@
 # edgar-entity-mcp
 
-[![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/edgar-entity-mcp.svg)](https://www.npmjs.com/package/edgar-entity-mcp) [![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · MCP Registry name: `io.github.pgeneralpl/edgar-entity-mcp`
+Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · npm: https://www.npmjs.com/package/edgar-entity-mcp · MCP Registry: [`io.github.pgeneralpl/edgar-entity-mcp`](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.pgeneralpl/edgar-entity-mcp)
 
 **US company research for AI agents, from official public data.** One MCP server that covers SEC EDGAR (filings, XBRL financials, Form 4 insider trades, cross-company comparisons) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA). Responses are compact JSON with source URLs, sized to keep token use low.
 
@@ -100,6 +100,10 @@ Other quick examples:
 ---
 
 ## Install
+
+Three ways to connect: the hosted endpoint `https://edgar-entity-mcp.vercel.app/mcp` (no install, see *Remote* below), the npm package [`edgar-entity-mcp`](https://www.npmjs.com/package/edgar-entity-mcp) over stdio (Node.js 20+), or any client that installs from the official [MCP Registry](https://registry.modelcontextprotocol.io) entry `io.github.pgeneralpl/edgar-entity-mcp`.
+
+Quick check: `npx -y edgar-entity-mcp --version`
 
 ### Claude Desktop / Claude Code / Cursor / Windsurf / VS Code (stdio via npx)
 
