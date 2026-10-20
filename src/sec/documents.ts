@@ -1,3 +1,4 @@
+import { stripInvisible as _strip } from "../core/untrusted.js";
 import { convert } from "html-to-text";
 import { getText, derived, assertSecUrl, validateFilingDocUrl } from "../core/http.js";
 import { TTL, getCache } from "../core/cache.js";
@@ -29,18 +30,10 @@ export function htmlToText(html: string): string {
   return tidy(text);
 }
 
-/**
- * Invisible / direction-changing characters that can hide instructions from a human reviewer
- * (zero-width spaces/joiners, bidi embeddings/overrides/isolates, word joiner, BOM, soft hyphen).
- */
-const INVISIBLE_RE = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
-
-export function stripInvisible(text: string): string {
-  return text.replace(INVISIBLE_RE, "");
-}
+export { stripInvisible } from "../core/untrusted.js";
 
 export function tidy(text: string): string {
-  return stripInvisible(text)
+  return _strip(text)
     .replace(/\u00a0/g, " ")
     .replace(/^-{10,}$/gm, "---")
     .replace(/\$[ \t]+(?=[\d(])/g, "$")
@@ -150,7 +143,7 @@ export async function fetchDocumentText(url: string, opts: { trusted?: boolean }
     const raw = await getText(canonical, "sec", TTL.filingDoc, { tier: "memory", maxBytes: config().maxDocumentBytes });
     const looksHtml = /\.(x?html?)$/i.test(u.pathname) || /<html|<body|<div|<p[\s>]/i.test(raw.slice(0, 5000));
     if (looksHtml) return { text: htmlToText(raw), kind: "html" };
-    if (/\.xml$/i.test(u.pathname)) return { text: stripInvisible(raw), kind: "xml" };
+    if (/\.xml$/i.test(u.pathname)) return { text: _strip(raw), kind: "xml" };
     return { text: tidy(raw), kind: "text" };
   };
   // Memory first (any size); then the shared tier, which only ever holds small processed text.

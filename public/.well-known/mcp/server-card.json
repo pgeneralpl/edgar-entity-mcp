@@ -395,7 +395,7 @@
           },
           "include_footnotes": {
             "default": false,
-            "description": "Include footnote text (10b5-1 plan details, price ranges)",
+            "description": "Include footnote and remarks text (10b5-1 plan details, price ranges); filer-written, untrusted",
             "type": "boolean"
           }
         },
@@ -462,7 +462,7 @@
           },
           "include_agent_details": {
             "default": false,
-            "description": "Include names/addresses of registered agents who are individuals (natural persons). Default false: only commercial/organizational agents are shown.",
+            "description": "Include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Requires an API key on the hosted server. Default false: only organizational agents are shown.",
             "type": "boolean"
           }
         }

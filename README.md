@@ -161,12 +161,17 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `SOCRATA_APP_TOKEN` | – | App token for the state portals (higher throttling limits; free at each portal's developer settings) |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | – | Enables Redis (Vercel's `KV_REST_API_URL`/`KV_REST_API_TOKEN` also work). Without them cache and quotas are in-memory. |
 | `QUOTA_ANON_PER_MINUTE` / `QUOTA_ANON_PER_DAY` | `30` / `300` | HTTP quota for anonymous clients, in units, per hashed IP |
-| `QUOTA_ANON_NETWORK_PER_DAY` | `3000` | Shared daily cap for all anonymous clients in one /24 (IPv6 /48), against address rotation |
-| `QUOTA_KEY_PER_MINUTE` / `QUOTA_KEY_PER_DAY` | `120` / `5000` | HTTP quota per API key (per-key overrides via `scripts/create-key.ts`) |
+| `QUOTA_ANON_NETWORK_PER_DAY` | `1500` | Shared daily cap for all anonymous clients in one /24 (IPv6 /48), against address rotation |
+| `QUOTA_ANON_GLOBAL_PER_DAY` | `2000` | Daily cap for **all** anonymous clients together (protects the Redis plan and the SEC budget; API-key callers are not affected) |
+| `QUOTA_KEY_PER_MINUTE` / `QUOTA_KEY_PER_DAY` | `120` / `2000` | HTTP quota per API key (per-key overrides via `scripts/create-key.ts`) |
+| `SEC_KEYED_RESERVED_RPS` | `2` | Part of `SEC_MAX_RPS` reserved for API-key callers (anonymous traffic shares the rest) |
+| `MAX_CONCURRENT_UPSTREAM_PER_CLIENT` | `4` | Concurrent upstream fetches per client (hashed IP or key); more wait, then get `RATE_LIMITED` |
+| `DEGRADED_SEC_RPS` | `1` (max 2) | Per-instance SEC rate while Redis is unavailable or over its plan limit |
 | `MCP_API_KEYS` | – | Comma-separated static keys (accepted alongside hashed keys stored in Redis) |
 | `MCP_REQUIRE_API_KEY` | – | `1` rejects anonymous HTTP calls with 401 (0.1.x required a key whenever `MCP_API_KEYS` was set) |
 | `KEY_REQUEST_URL` | GitHub issue link | Shown in RATE_LIMITED hints as the place to request a free key |
-| `IP_HASH_SALT` | derived from the Upstash token | Secret for the IP hash. The salt actually used is `HMAC-SHA256(IP_HASH_SALT, UTC date)`, so it rotates daily. Set a random value (≥32 chars) in production. |
+| `IP_HASH_SALT` | – (**required with Redis**) | Secret (≥32 random chars, e.g. `openssl rand -hex 32`) for the IP hash. The salt actually used is `HMAC-SHA256(IP_HASH_SALT, UTC date)`, so it rotates daily. With Redis configured and this missing, set to the old default `edgar-entity-mcp`, or shorter than 32 chars, the server refuses to start (node: exit 1; Vercel: every request gets 503 and `/health` says `misconfigured`). |
+| `API_KEY_SECRET` | derived from `IP_HASH_SALT` | Secret (≥32 chars) used to sign API keys (`eem_<id>_<HMAC>`). Rotating it invalidates every minted key at once. |
 | `HEALTH_SECRET` | – | Enables `/health?deep=1` (Redis ping) for requests sending `x-health-secret: <value>` |
 | `SUPPRESSION_FILE` | – | JSON array of suppression entries (see [Privacy](#privacy-and-personal-data)) |
 | `MAX_BODY_BYTES` / `MAX_DOCUMENT_BYTES` | 65536 / 15 MB | HTTP request body cap / max filing document size |
@@ -182,27 +187,57 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 |---|---|
 | `list_supported_states` | 0 |
 | `search_company`, `get_company_profile`, `get_xbrl_concept` | 1 |
-| `list_filings` | 1 (3 with date filters or offset, which may page through older history) |
+| `list_filings` | 1 (6 with date filters or offset, which may page through up to 4 older-history files) |
 | `get_financials` | 2 |
 | `compare_companies` | 3 |
-| `get_filing_document` | 3 by `url`, 4 by `company` + `accession` |
-| `get_insider_trades` | 1 + `limit` (max 20 filings → 21) |
+| `get_filing_document` | 4 by `url`, 10 by `company` + `accession` |
+| `get_insider_trades` | 6 + `limit` (max 20 filings → 26) |
 | `lookup_business_entity` | number of states (max 5) |
 
 | Client | Per minute | Per day (UTC) |
 |---|---|---|
 | Anonymous (per IP, IPv6 per /64) | 30 | 300 |
-| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 3,000 |
-| Free API key | 120 | 5,000 |
+| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 1,500 |
+| All anonymous clients together | – | 2,000 |
+| Free API key | 120 | 2,000 |
 
-Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the limit, and how to get a key. Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Operators mint them with `npx tsx scripts/create-key.ts --label gh-issue-42` (only the SHA-256 of the key, the label, the creation date and any per-key limits are stored; the label should be a reference, not a name or email) and revoke with `--revoke`. Running locally via `npx -y edgar-entity-mcp` has no quota.
+Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`), the limit, and how to get a key. Running locally via `npx -y edgar-entity-mcp` has no quota.
+
+Fair share of the upstream budget: `SEC_KEYED_RESERVED_RPS` (2 of the 6 SEC requests/s by default) is reserved for API-key callers, and each client may have at most `MAX_CONCURRENT_UPSTREAM_PER_CLIENT` (4) upstream fetches in flight. The SEC token bucket refills smoothly (one token every ~167 ms at 6 rps, burst 2).
+
+### API keys
+
+Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Keys look like `eem_<12-char id>_<24-hex HMAC>` and are **self-verifying**: the server checks the HMAC (keyed with `API_KEY_SECRET`) locally, so random or forged keys are rejected without touching Redis, and a client sending more than 10 bad keys in 10 minutes gets HTTP 429. A valid key is then looked up once (`eem:v1:apikey:<id>`, to honour deletion and per-key limits) and remembered for 5 minutes.
+
+- Mint: `npx tsx scripts/create-key.ts [--per-day N] [--per-minute N]`. The key is printed once. The record holds **only** the creation date and optional limits: no owner name, email or other contact is collected (the key request lives in the issue tracker; note the key id there if you may need it later).
+- Delete: `npx tsx scripts/delete-key.ts <key-or-id>` removes the record and all of the key's live counters; running instances stop accepting it within 5 minutes. Rotating `API_KEY_SECRET` revokes every key immediately.
+- Both scripts need the deployment's `UPSTASH_REDIS_REST_*`, `IP_HASH_SALT` and (if set) `API_KEY_SECRET`.
+- `include_agent_details` on `lookup_business_entity` only takes effect for API-key callers (see [Privacy](#privacy-and-personal-data)).
+
+### Fitting the Upstash free plan (and what happens when it runs out)
+
+Redis usage per call is bounded so the hosted server fits Upstash's free tier (~500K commands/month, ≈16K/day):
+
+| Event | Redis commands |
+|---|---|
+| Allowed call, quota check (all counters: IP day, /24 day, global, minute, in one `EVALSHA`) | 1 |
+| Blocked call, first time | 1 |
+| Blocked call again (memoised in memory until the window ends, e.g. UTC midnight for day caps) | 0 |
+| Random / forged API key | 0 |
+| MAC-valid key, first use (then memoised 5 min) | 1 |
+| Shared cache (cold call; warm calls are served from process memory) | ~4–16 |
+
+These numbers are asserted in `tests/budget.test.ts`. The anonymous global cap (2,000 units/day) bounds anonymous Redis traffic; there is no per-tool usage history.
+
+**Degraded mode.** If Redis errors, times out or reports its plan limit, the instance switches for 60 s at a time to local in-memory quotas (same limits, per instance), skips the Redis cache, and paces SEC at `DEGRADED_SEC_RPS` (1/s) per instance, instead of failing every call. MAC-valid API keys keep working at default key limits during this time (a key deleted moments before an outage may work until Redis recovers). State-registry lookups are refused if the suppression list has never been loaded on that instance (see below). `/health` reports `status: "degraded"`.
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 
 ## Privacy and personal data
 
-- Registered agents that are individuals (natural persons) are returned as `{ "kind": "individual", "withheld": true }` unless the caller sets `include_agent_details: true`. Organizational agents are always shown.
-- Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Suppressed data is never returned.
+- Registered agents and service-of-process contacts are treated as **individuals unless the name ends with a legal-form suffix** (Inc, Corp, LLC, LLP, LP, Ltd, Company, "& Co", Bank, N.A., …) or is a known registered-agent service (CT Corporation, CSC, Cogency Global, …). "JOHN CHURCH", "JUDE LAW", "DAVID CO" and "JOHN SMITH PA" are individuals; ambiguous CO/PA/PC endings count as individual.
+- Individual agents are returned as `{ "kind": "individual", "withheld": true }`, and the entity's principal/mailing addresses (and NY location name) are withheld too (`addresses_withheld: true`), since for one-person businesses these are often a home address. `include_agent_details: true` reveals them **only for API-key callers** (and local stdio use); anonymous HTTP callers get a privacy note instead. Organizational agents are always shown.
+- Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Entity ids are normalized (case, punctuation, leading zeros). A suppressed name is matched as whole words in agent names and addresses **and** in the entity name, NY location name and principal/mailing addresses; any hit removes every personal field of that record. If Redis is configured but the suppression list cannot be loaded on a cold instance, state lookups are refused (before any registry request) rather than served without it.
 - Form 4 reporting-owner names are statutory public disclosures and are returned by `get_insider_trades`.
 
 ### What the hosted server stores, and for how long
@@ -211,20 +246,21 @@ Rate limiting keeps **only integer counters** in Redis, under hashed identifiers
 
 | Redis key | Value | TTL |
 |---|---|---|
-| `eem:v1:q:m:ip:<hash>:<minute>` / `…:q:m:key:<hash>:<minute>` | units used this minute | 60 s (the window) |
+| `eem:v1:q:m:ip:<hash>:<minute>` / `…:q:m:key:<id>:<minute>` | units used this minute | 70 s (the window + 10 s slack) |
 | `eem:v1:q:d:ip:<hash>:<YYYYMMDD>` | units used today (UTC) by one IP (IPv6: /64) | 25 h (the day + 1 h slack) |
 | `eem:v1:q:d:net:<hash>:<YYYYMMDD>` | units used today by all anonymous clients of one /24 (IPv6: /48) | 25 h |
-| `eem:v1:q:d:key:<hash>:<YYYYMMDD>` | units used today by one API key | 25 h |
+| `eem:v1:q:d:anon:<YYYYMMDD>` | units used today by all anonymous clients together | 25 h |
+| `eem:v1:q:d:key:<id>:<YYYYMMDD>` | units used today by one API key | 25 h |
 
 - `<hash>` for IPs is `HMAC-SHA256(daily salt, IP or prefix)` truncated to 80 bits, where the daily salt is `HMAC-SHA256(IP_HASH_SALT, YYYYMMDD)`. Hashes from different days can't be linked, and once a day's counters expire nothing derived from that day's IPs is left. A request is hashed and counted against the same UTC day, so requests that straddle midnight are counted consistently. The per-minute counter for an IP restarts at midnight because its hash changes, so a client can get at most one extra minute's worth of quota at that moment.
-- For keys, `<hash>` is a prefix of the key's SHA-256. API key records (`eem:v1:apikey:<sha256>`) hold the label, the creation date and optional per-key limits, with no expiry until revoked. The suppression set (`eem:v1:suppress`) holds erasure-request entries.
+- For keys, `<id>` is the key's public id (the secret part never reaches Redis). API key records (`eem:v1:apikey:<id>`) hold only the creation date and optional per-key limits, until deleted with `scripts/delete-key.ts` (which also deletes the key's counters). The suppression set (`eem:v1:suppress`) holds erasure-request entries.
 - Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries for public SEC and state data are stored under `eem:v1:c:<sha256 of the upstream request>`, so key names don't reveal what was searched. The upstream fan-out budget (`eem:rl:*`) is a global token bucket with no per-client data.
 - **Logs**: errors (and, with `USAGE_LOG=1`, one line per call with tool name, latency, outcome, response size and the daily-rotating principal hash) go to stderr, then to Vercel runtime logs, which expire under Vercel's plan retention ([limits](https://vercel.com/docs/logs/runtime#limits)). Error text has URL query strings, IP addresses, email addresses and credential-like values masked. Tool arguments, API keys and raw IPs are never logged by this server. Vercel's own platform request logs (outside this code) record request metadata such as path and client IP under Vercel's retention.
 - `/health` reports this configuration under `quotas.state`.
 
 ## Security notes
 
-- Filing text from `get_filing_document` is untrusted, filer-authored content. It is returned between `<<<BEGIN UNTRUSTED SEC FILING TEXT>>>` / `<<<END …>>>` markers with `untrusted_content: true`, and zero-width/bidi control characters are stripped. Agents should treat it as data, never as instructions.
+- Filing text from `get_filing_document` is untrusted, filer-authored content. It is returned between `<<<BEGIN UNTRUSTED SEC FILING TEXT id=<nonce>>>>` / `<<<END UNTRUSTED SEC FILING TEXT id=<nonce>>>>` markers, where the nonce is random per response and repeated in `untrusted_marker_id`, so filer text cannot fake a closing marker. Zero-width, bidi control and Unicode tag characters (U+E0000–E007F) are stripped. Other third-party text (entity names and addresses, Form 4 reporter names, remarks and footnotes, XBRL labels and descriptions) is cleaned the same way and listed in each response's `untrusted_fields`. Agents should treat all of it as data, never as instructions.
 - Only `https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file>` URLs are accepted as document input; redirects are followed manually and re-checked against the host allowlist.
 - Error messages returned to clients are generic; details go to server logs with a reference id.
 
@@ -232,13 +268,13 @@ Rate limiting keeps **only integer counters** in Redis, under hashed identifiers
 
 SEC's [fair-access policy](https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data) caps clients at **10 requests/second** and requires a declared User-Agent. SEC may block clients without one (HTTP 403 "Undeclared Automated Tool"). This server:
 - sends `SEC_USER_AGENT` on every SEC request;
-- spaces requests through a two-stage limiter: per-process spacing plus, with Redis, an atomic fleet-wide token bucket (6 req/s default). If Redis is unreachable or no token is granted within ~5 s, the call fails with `RATE_LIMITED` rather than exceeding the budget;
+- spaces requests through a two-stage limiter: per-process spacing plus, with Redis, atomic fleet-wide token buckets (6 req/s default, 2 of them reserved for API-key callers; smooth refill, burst 2). If no token is granted within ~5 s the call fails with `RATE_LIMITED`; if Redis itself is unavailable or over its plan, each instance falls back to 1 req/s (degraded mode);
 - retries 429/5xx with exponential backoff and respects `Retry-After`;
 - deduplicates identical in-flight requests and caches with TTLs: tickers 24h, submissions 10 min, companyfacts/concepts 6h, frames 12h, filing documents 30 days in process memory (raw documents are never written to Redis; processed text under 256 KB and parsed Form 4s are shared for 7 days), state searches 1h.
 
 ## Monetization hooks (no billing yet)
 
-- **HTTP gate**: hashed keys in Redis (`scripts/create-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401.
+- **HTTP gate**: self-verifying keys registered in Redis (`scripts/create-key.ts` / `scripts/delete-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401.
 - **Per-call metering**: `setUsageHooks({ beforeCall, afterCall })` (exported from the package). `beforeCall` receives `{tool, transport, apiKey, clientId, principal, args}`; throwing a `ToolError` rejects the call with that code (anything else becomes `UNAUTHORIZED`). The built-in quota hook runs first. `afterCall` receives `{ok, ms, errorCode, responseChars}`, which is enough for pay-per-call or per-token pricing.
 - Suggested tiers: free (stdio or keyless HTTP, cached), Pro (API key, higher limits, bulk/paginated exports), Team (webhooks for new filings or insider trades).
 

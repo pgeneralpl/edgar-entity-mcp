@@ -3,7 +3,8 @@ import { TTL } from "../core/cache.js";
 import { ToolError } from "../core/errors.js";
 import { STATE_SOURCES, type NormalizedEntity, type StateSource } from "./registry.js";
 import { coreTokens, dice } from "../sec/tickers.js";
-import { applyPrivacy, loadSuppression } from "./suppression.js";
+import { applyPrivacy, loadSuppression, type Suppression } from "./suppression.js";
+import { stripInvisible } from "../core/untrusted.js";
 
 export type MatchMode = "contains" | "starts_with" | "exact";
 
@@ -62,10 +63,12 @@ export function rankEntities(rows: NormalizedEntity[], query?: string): Normaliz
 
 export async function searchState(
   code: string,
-  opts: { name?: string; entityId?: string; mode: MatchMode; limit: number; activeOnly?: boolean; includeAgentDetails?: boolean },
+  opts: { name?: string; entityId?: string; mode: MatchMode; limit: number; activeOnly?: boolean; includeAgentDetails?: boolean; suppression?: Suppression },
 ): Promise<{ entities: NormalizedEntity[]; query_url: string }> {
   const src = STATE_SOURCES[code];
   if (!src) throw new ToolError("UNSUPPORTED", `State ${code} is not supported.`);
+  // Load the suppression list BEFORE any upstream request: refuse (cold start, Redis down) early.
+  const suppression = opts.suppression ?? (await loadSuppression());
   const where = buildWhere(src, opts);
   if (!where) throw new ToolError("INVALID_INPUT", "Provide name or entity_id.");
   // Modest over-fetch so we can rank, and to group multi-row datasets.
@@ -74,6 +77,21 @@ export async function searchState(
   const rows = await getJson<Record<string, unknown>[]>(url, "socrata", TTL.stateSearch);
   if (!Array.isArray(rows)) throw new ToolError("UPSTREAM_ERROR", `Unexpected response from ${src.domain}`);
   const ranked = rankEntities(src.normalize(rows, (id) => rowSourceUrl(src, id)), opts.name).slice(0, opts.limit);
-  const entities = applyPrivacy(ranked, { includeAgentDetails: !!opts.includeAgentDetails, suppression: await loadSuppression() });
+  const entities = applyPrivacy(ranked.map(cleanEntityText), { includeAgentDetails: !!opts.includeAgentDetails, suppression });
   return { entities, query_url: url };
+}
+
+/** Registry text is third-party input: strip invisible/bidi/tag characters from free-text fields. */
+function cleanEntityText(e: NormalizedEntity): NormalizedEntity {
+  const c = (v: string | undefined) => (v === undefined ? v : stripInvisible(v));
+  const ag = (a: NormalizedEntity["registered_agent"]) => (a ? { ...a, name: c(a.name), address: c(a.address) } : a);
+  return {
+    ...e,
+    name: c(e.name)!,
+    location_name: c(e.location_name),
+    principal_address: c(e.principal_address),
+    mailing_address: c(e.mailing_address),
+    registered_agent: ag(e.registered_agent),
+    service_of_process: ag(e.service_of_process),
+  };
 }

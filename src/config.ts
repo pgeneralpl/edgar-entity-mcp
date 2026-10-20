@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHmac } from "node:crypto";
 import { PACKAGE_NAME, VERSION } from "./version.js";
 
 /** Runtime configuration, read lazily from the environment so tests can override it. */
@@ -20,11 +20,20 @@ export interface Config {
   secUserAgentValid: boolean;
   /** Require an API key on the HTTP transport (anonymous calls rejected). */
   requireApiKey: boolean;
-  quota: { anonPerMinute: number; anonPerDay: number; anonNetworkPerDay: number; keyPerMinute: number; keyPerDay: number };
-  /** Salt for hashing client IPs before they are used as Redis keys. */
+  quota: { anonPerMinute: number; anonPerDay: number; anonNetworkPerDay: number; anonGlobalPerDay: number; keyPerMinute: number; keyPerDay: number };
   /** Secret for the daily-rotating IP hash salt (see core/apiKeys.ts daySalt). */
   ipHashSecret: string;
-  ipHashSecretSource: "env" | "redis-token" | "builtin";
+  ipHashSecretSource: "env" | "builtin";
+  /** Secret for API key MACs (API_KEY_SECRET, else derived from IP_HASH_SALT). */
+  apiKeySecret: string;
+  /** Set when the HTTP server must refuse to serve (e.g. Redis on but no strong IP_HASH_SALT). */
+  startupProblem?: string;
+  /** SEC requests/second reserved for API-key callers (out of secMaxRps). */
+  secKeyedReservedRps: number;
+  /** Local SEC rate while Redis is unavailable (degraded mode). */
+  degradedSecRps: number;
+  /** Max concurrent upstream fetches per client (per instance). */
+  maxConcurrentUpstreamPerClient: number;
   /** Where users can request a free API key (shown in RATE_LIMITED hints). */
   keyRequestUrl: string;
   /** Shared secret for /health?deep=1 (header x-health-secret). Unset = deep checks disabled. */
@@ -73,11 +82,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     quota: {
       anonPerMinute: num(env.QUOTA_ANON_PER_MINUTE, 30),
       anonPerDay: num(env.QUOTA_ANON_PER_DAY, 300),
-      anonNetworkPerDay: num(env.QUOTA_ANON_NETWORK_PER_DAY, 3000),
+      anonNetworkPerDay: num(env.QUOTA_ANON_NETWORK_PER_DAY, 1500),
+      anonGlobalPerDay: num(env.QUOTA_ANON_GLOBAL_PER_DAY, 2000),
       keyPerMinute: num(env.QUOTA_KEY_PER_MINUTE, 120),
-      keyPerDay: num(env.QUOTA_KEY_PER_DAY, 5000),
+      keyPerDay: num(env.QUOTA_KEY_PER_DAY, 2000),
     },
-    ...ipHashSecret(env),
+    ...secrets(env),
+    secKeyedReservedRps: Math.min(num(env.SEC_KEYED_RESERVED_RPS, 2), Math.max(0, Math.min(num(env.SEC_MAX_RPS, 6), 8) - 1)),
+    degradedSecRps: Math.min(num(env.DEGRADED_SEC_RPS, 1), 2),
+    maxConcurrentUpstreamPerClient: num(env.MAX_CONCURRENT_UPSTREAM_PER_CLIENT, 4),
     keyRequestUrl: env.KEY_REQUEST_URL?.trim() || "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request",
     healthSecret: env.HEALTH_SECRET?.trim() || undefined,
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
@@ -86,16 +99,29 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
+export const BUILTIN_IP_HASH_SALT = "edgar-entity-mcp";
+export const MIN_SECRET_LENGTH = 32;
+
 /**
- * IP_HASH_SALT if set; otherwise derived from the (secret) Upstash token so a fleet sharing one
- * Redis still agrees on hashes; otherwise a built-in constant (memory-only self-hosting).
+ * IP_HASH_SALT (secret, >= 32 chars) is mandatory whenever Redis is configured: hashes stored there
+ * must not be reversible with a public salt. Without Redis nothing is persisted, so the built-in
+ * value is tolerated for local/self-hosted use.
  */
-function ipHashSecret(env: NodeJS.ProcessEnv): Pick<Config, "ipHashSecret" | "ipHashSecretSource"> {
+function secrets(env: NodeJS.ProcessEnv): Pick<Config, "ipHashSecret" | "ipHashSecretSource" | "apiKeySecret" | "startupProblem"> {
   const s = env.IP_HASH_SALT?.trim();
-  if (s) return { ipHashSecret: s, ipHashSecretSource: "env" };
-  const tok = (env.UPSTASH_REDIS_REST_TOKEN || env.KV_REST_API_TOKEN)?.trim();
-  if (tok) return { ipHashSecret: createHash("sha256").update("edgar-entity-mcp/ip-salt|" + tok).digest("hex"), ipHashSecretSource: "redis-token" };
-  return { ipHashSecret: "edgar-entity-mcp", ipHashSecretSource: "builtin" };
+  const redis = !!((env.UPSTASH_REDIS_REST_URL || env.KV_REST_API_URL)?.trim() && (env.UPSTASH_REDIS_REST_TOKEN || env.KV_REST_API_TOKEN)?.trim());
+  const weak = !s || s === BUILTIN_IP_HASH_SALT || s.length < MIN_SECRET_LENGTH;
+  const ipHashSecret = s || BUILTIN_IP_HASH_SALT;
+  const k = env.API_KEY_SECRET?.trim();
+  let startupProblem: string | undefined;
+  if (redis && weak) startupProblem = `IP_HASH_SALT must be set to a random secret of at least ${MIN_SECRET_LENGTH} characters when Redis is configured.`;
+  else if (k && k.length < MIN_SECRET_LENGTH) startupProblem = `API_KEY_SECRET must be at least ${MIN_SECRET_LENGTH} characters.`;
+  return {
+    ipHashSecret,
+    ipHashSecretSource: s ? "env" : "builtin",
+    apiKeySecret: k || createHmac("sha256", ipHashSecret).update("edgar-entity-mcp/api-key-mac/v1").digest("hex"),
+    startupProblem,
+  };
 }
 
 let cached: Config | undefined;

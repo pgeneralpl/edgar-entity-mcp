@@ -4,26 +4,33 @@ import { PACKAGE_NAME, VERSION } from "../version.js";
 import { SUPPORTED_STATES } from "../states/registry.js";
 import { getRedis } from "../core/cache.js";
 import { logError } from "../core/errors.js";
+import { degradedStatus } from "../core/degraded.js";
 
 /** Public health payload. Reports configuration *shape* only, never secret values. */
 export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
   const c = loadConfig(env);
   const redis = !!(c.upstashUrl && c.upstashToken);
+  const degraded = degradedStatus();
   return {
-    status: "ok",
+    // "misconfigured": Redis is on but the hashing secret is missing/weak; every request gets 503.
+    status: c.startupProblem ? "misconfigured" : degraded.degraded ? "degraded" : "ok",
+    ...(degraded.degraded ? { degraded: { reason: degraded.reason, since: degraded.since, mode: "local in-memory limits, SEC at the degraded rate" } } : {}),
     name: PACKAGE_NAME,
     version: VERSION,
     mcp_endpoint: "/mcp",
     cache: redis ? "upstash+memory" : "memory",
     sec_rate_limit: {
       rps: c.secMaxRps,
+      reserved_for_api_keys_rps: redis ? Math.min(c.secKeyedReservedRps, Math.max(0, c.secMaxRps - 1)) : 0,
+      degraded_rps: c.degradedSecRps,
+      max_concurrent_upstream_per_client: c.maxConcurrentUpstreamPerClient,
       scope: redis && env.SEC_DISTRIBUTED_RATE_LIMIT !== "0" && env.DISTRIBUTED_RATE_LIMIT !== "0" ? "fleet (redis)" : "instance",
     },
     quotas: {
-      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay, units_per_day_per_network: c.quota.anonNetworkPerDay },
+      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay, units_per_day_per_network: c.quota.anonNetworkPerDay, units_per_day_all_anonymous: c.quota.anonGlobalPerDay },
       api_key: { units_per_minute: c.quota.keyPerMinute, units_per_day: c.quota.keyPerDay },
       // What rate limiting stores: integer counters under daily-rotating hashed ids, TTL = window.
-      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, day_counter_ttl_hours: 25, minute_counter_ttl_seconds: 60 },
+      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, day_counter_ttl_hours: 25, minute_counter_ttl_seconds: 70 },
     },
     sec_user_agent_configured: c.secUserAgentValid,
     auth_required: c.requireApiKey,

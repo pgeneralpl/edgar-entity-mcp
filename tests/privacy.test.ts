@@ -7,71 +7,21 @@ import { Redis } from "@upstash/redis";
 import { loadConfig, resetConfig } from "../src/config.js";
 import { MemoryCache, TieredCache, UpstashCache, cached, setCache } from "../src/core/cache.js";
 import { resetLimiters } from "../src/core/http.js";
-import { DAY_COUNTER_TTL_SECONDS, UpstashQuotaStore, setQuotaStore } from "../src/core/quota.js";
+import { DAY_COUNTER_TTL_SECONDS, MINUTE_COUNTER_TTL_SECONDS, UpstashQuotaStore, setQuotaStore } from "../src/core/quota.js";
 import { clearApiKeyMemo, clearSaltMemo, daySalt, ipPrincipal } from "../src/core/apiKeys.js";
 import { HttpError, logError } from "../src/core/errors.js";
 import { createHttpHandler } from "../src/http/handler.js";
 import { setSystemUsageHook, setUsageHooks, stderrUsageLogger } from "../src/core/usage.js";
 
-const FAKE = "https://fake-upstash.test";
+import { FAKE, fakeUpstash } from "./helpers/fakeUpstash.js";
 const RAW_IP = "203.0.113.77";
 const XFF_IP = "198.51.100.23";
 const SECRET_ARG = "SENSITIVEARG-Jane-Doe";
 const UA_STR = "SecretAgentUA/9.9";
 
-/** Minimal Upstash REST emulator recording every command (keys, args, values). */
-function fakeUpstash() {
-  const commands: unknown[][] = [];
-  const kv = new Map<string, { v: string; ttl?: number }>();
-  const exec = (cmd: unknown[]): unknown => {
-    commands.push(cmd);
-    const [op, ...a] = cmd.map(String);
-    switch ((op ?? "").toLowerCase()) {
-      case "get":
-        return kv.get(a[0]!)?.v ?? null;
-      case "set": {
-        const exIdx = a.findIndex((x) => x.toLowerCase() === "ex");
-        kv.set(a[0]!, { v: a[1]!, ttl: exIdx > 0 ? Number(a[exIdx + 1]) : undefined });
-        return "OK";
-      }
-      case "smembers":
-        return [];
-      case "evalsha":
-      case "eval": {
-        const nkeys = Number(a[1]);
-        const keys = a.slice(2, 2 + nkeys);
-        const args = a.slice(2 + nkeys);
-        if (args.length === 3) {
-          // @upstash/ratelimit fixed window: [limit, windowMs, increment]
-          const cur = Number(kv.get(keys[0]!)?.v ?? 0) + Number(args[2]);
-          kv.set(keys[0]!, { v: String(cur), ttl: Math.ceil(Number(args[1]) / 1000) });
-          return [cur, Number(args[0])];
-        }
-        // our daily script: [cost, limit, ttl, netlimit]
-        for (const k of keys) {
-          const cur = Number(kv.get(k)?.v ?? 0) + Number(args[0]);
-          kv.set(k, { v: String(cur), ttl: Number(args[2]) });
-        }
-        return [1, Number(args[0])];
-      }
-      default:
-        return null;
-    }
-  };
-  const fetchStub = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    if (!url.startsWith(FAKE)) throw new Error(`unexpected network call: ${url}`);
-    const body = JSON.parse(String(init?.body ?? "[]")) as unknown[];
-    const isBatch = /\/(pipeline|multi-exec)$/.test(new URL(url).pathname);
-    const out = isBatch ? (body as unknown[][]).map((c) => ({ result: exec(c) })) : { result: exec(body) };
-    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
-  });
-  return { commands, kv, fetchStub };
-}
-
 let stderr: string[] = [];
 beforeEach(() => {
-  resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", IP_HASH_SALT: "test-secret", UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" }));
+  resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", IP_HASH_SALT: "test-secret-0123456789abcdefghijklmnop", UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" }));
   clearSaltMemo();
   stderr = [];
   vi.spyOn(process.stderr, "write").mockImplementation((s: string | Uint8Array) => {
@@ -120,11 +70,11 @@ describe("Redis rate-limit state contains no raw IPs, user agents, paths or tool
     expect(keys.some((k) => /^eem:v1:q:d:net:[0-9a-f]{20}:\d{8}$/.test(k))).toBe(true); // per-/24 daily
     expect(keys.some((k) => /^eem:v1:q:m:ip:[0-9a-f]{20}:\d+$/.test(k))).toBe(true); // per-minute
     // Every key is a hashed id, a cache hash, or a counter; every quota value is an integer.
-    for (const k of keys) expect(k).toMatch(/^eem:v1:(q:[dm]:(ip|net|key):[0-9a-f]+:\d+|c:[0-9a-f]{40})$/);
+    for (const k of keys) expect(k).toMatch(/^eem:v1:(q:[dm]:((ip|net|key):[0-9a-f]+|anon):\d+|c:[0-9a-f]{40})$/);
     for (const [k, { v, ttl }] of f.kv) {
       if (k.includes(":q:")) expect(v).toMatch(/^\d+$/);
       if (k.includes(":q:d:")) expect(ttl).toBe(DAY_COUNTER_TTL_SECONDS);
-      if (k.includes(":q:m:")) expect(ttl).toBeLessThanOrEqual(120);
+      if (k.includes(":q:m:")) expect(ttl).toBe(MINUTE_COUNTER_TTL_SECONDS);
     }
     expect(DAY_COUNTER_TTL_SECONDS).toBe(25 * 3600);
     expect(keys.some((k) => /:u:/.test(k))).toBe(false); // no usage hashes
@@ -154,12 +104,16 @@ describe("daily-rotating IP hash salt", () => {
     expect(dayKeys.length).toBe(2);
     expect(dayKeys.every((k) => k.endsWith(":20261020"))).toBe(true);
   });
-  it("without IP_HASH_SALT, derives the secret from the Upstash token (never a public constant on a fleet)", () => {
-    const withTok = loadConfig({ KV_REST_API_TOKEN: "tok-1" });
-    expect(withTok.ipHashSecretSource).toBe("redis-token");
-    expect(withTok.ipHashSecret).not.toContain("tok-1");
-    expect(loadConfig({}).ipHashSecretSource).toBe("builtin");
-    expect(loadConfig({ IP_HASH_SALT: "s" }).ipHashSecretSource).toBe("env");
+  it("refuses to serve when Redis is on and IP_HASH_SALT is missing, default or short", async () => {
+    const redis = { UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" };
+    expect(loadConfig(redis).startupProblem).toMatch(/IP_HASH_SALT/);
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "edgar-entity-mcp" }).startupProblem).toMatch(/IP_HASH_SALT/);
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "short-secret" }).startupProblem).toMatch(/32/);
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "x".repeat(32) }).startupProblem).toBeUndefined();
+    expect(loadConfig({}).startupProblem).toBeUndefined(); // no Redis: nothing persisted
+    resetConfig(loadConfig({ ...redis, SEC_USER_AGENT: "T t@example.org" }));
+    const res = await createHttpHandler()(new Request("https://x/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }));
+    expect(res.status).toBe(503);
   });
 });
 

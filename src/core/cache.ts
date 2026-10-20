@@ -2,6 +2,7 @@ import { LRUCache } from "lru-cache";
 import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { config } from "../config.js";
+import { markRedisDegraded, redisDegraded } from "./degraded.js";
 
 /**
  * Pluggable string cache. Values are opaque strings (usually JSON).
@@ -50,19 +51,21 @@ export class UpstashCache implements Cache {
     private maxValueBytes: number,
   ) {}
   async get(key: string) {
+    if (redisDegraded()) return undefined; // save commands / latency while Redis is down or over plan
     try {
       const v = await this.redis.get<string>(redisCacheKey(key));
       return v ?? undefined;
-    } catch {
+    } catch (e) {
+      markRedisDegraded(e);
       return undefined; // cache failures must never break tools
     }
   }
   async set(key: string, value: string, ttlSeconds: number) {
-    if (value.length > this.maxValueBytes) return;
+    if (value.length > this.maxValueBytes || redisDegraded()) return;
     try {
       await this.redis.set(redisCacheKey(key), value, { ex: Math.max(1, Math.round(ttlSeconds)) });
-    } catch {
-      /* ignore */
+    } catch (e) {
+      markRedisDegraded(e);
     }
   }
 }

@@ -8,11 +8,15 @@ export interface NormalizedEntity {
   type?: string;
   formed?: string;
   jurisdiction?: string;
+  /** NY: name on the principal location (can be a person). Withheld with the addresses when personal. */
+  location_name?: string;
   principal_address?: string;
   mailing_address?: string;
   registered_agent?: AgentInfo;
   /** NY: the person/company designated by the DOS to receive service of process. */
   service_of_process?: AgentInfo;
+  /** True when addresses were withheld because a related party (agent/process contact) is an individual. */
+  addresses_withheld?: boolean;
   /** Set when personal data was removed because of an erasure/suppression request. */
   redacted?: string;
   county?: string;
@@ -32,18 +36,41 @@ export interface AgentInfo {
 
 type Row = Record<string, unknown>;
 
-/** Heuristic: does this look like an organization rather than a natural person? */
-const ORG_RE =
-  /\b(INC|INCORPORATED|LLC|L\.L\.C|LLP|LP|L\.P|LTD|LIMITED|CORP|CORPORATION|CO|COMPANY|PC|P\.C|PLLC|PA|TRUST|BANK|ASSOCIATION|ASSN|GROUP|PARTNERS|PARTNERSHIP|HOLDINGS|SERVICES?|AGENTS?|AGENCY|SYSTEMS?|SOLUTIONS|FUND|FOUNDATION|SOCIETY|UNIVERSITY|COLLEGE|CHURCH|COUNCIL|LAW|ATTORNEYS|ASSOCIATES|REGISTERED|ENTERPRISES?|INTERNATIONAL|CSC|CT|NRAI|COGENCY|INCORP|CAPITOL|NORTHWEST)\b/i;
+/**
+ * Conservative heuristic, defaulting to "individual" (withheld): a name counts as an organization
+ * only if it ENDS with an unambiguous legal-form suffix, or matches a known commercial
+ * registered-agent service. Ambiguous endings are treated as individuals on purpose:
+ * "CO" ("DAVID CO"), "PA"/"PC" (professional associations of one person, and surnames), "LAW",
+ * "CHURCH", "GROUP", "TRUST" (often a person's trust).
+ */
+const ORG_SUFFIX_RE =
+  /(?:^|\s)(INC|INCORPORATED|CORP|CORPORATION|LLC|L L C|LLP|L L P|LLLP|PLLC|P L L C|LP|L P|LTD|LIMITED|COMPANY|(?:&|AND) CO|BANK|N A|ASSOCIATION|FOUNDATION|UNIVERSITY)$/;
+const KNOWN_AGENT_SERVICES_RE =
+  /^(?:THE )?(?:C ?T CORPORATION SYSTEM|CORPORATION SERVICE COMPANY|CSC[- ]LAWYERS INCORPORATING SERVICE|NATIONAL REGISTERED AGENTS|NORTHWEST REGISTERED AGENT|REGISTERED AGENTS? (?:INC|LEGAL SERVICES|SOLUTIONS)|COGENCY GLOBAL|INCORP SERVICES|UNITED STATES CORPORATION AGENTS|CORPORATION TRUST COMPANY|LEGALINC CORPORATE SERVICES|BUSINESS FILINGS INCORPORATED|HARBOR COMPLIANCE|CAPITOL SERVICES|A REGISTERED AGENT)\b/;
+
+export function normalizeName(name: string): string {
+  return name
+    .toUpperCase()
+    .replace(/[.,]/g, " ")
+    .replace(/[^A-Z0-9& ]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 export function looksLikeOrganization(name: string | undefined): boolean {
-  return !!name && ORG_RE.test(name.replace(/[,.]/g, (m) => (m === "." ? "." : " ")));
+  if (!name) return false;
+  const n = normalizeName(name);
+  return ORG_SUFFIX_RE.test(n) || KNOWN_AGENT_SERVICES_RE.test(n);
 }
 
 /** Build an AgentInfo, classifying it when the source does not say. */
 export function agent(name: string | undefined, address: string | undefined, kind?: "organization" | "individual"): AgentInfo | undefined {
   if (!name && !address) return undefined;
-  return compact({ name, address, kind: kind ?? (looksLikeOrganization(name) ? "organization" : "individual") }) as AgentInfo;
+  // Default to individual. A source hint of "individual" always wins; otherwise "organization"
+  // requires the conservative name heuristic (even in "organization name" columns, which are
+  // free text and sometimes hold a person's name).
+  const k = kind === "individual" ? "individual" : looksLikeOrganization(name) ? "organization" : "individual";
+  return compact({ name, address, kind: k }) as AgentInfo;
 }
 
 export interface StateSource {
@@ -147,6 +174,7 @@ const NY: StateSource = {
         formed: isoDate(s(r.initial_dos_filing_date)),
         jurisdiction: s(r.jurisdiction),
         county: s(r.county),
+        location_name: s(r.location_name),
         principal_address: joinAddr(r.location_name, r.location_address_1, r.location_address_2, r.location_city, r.location_state, r.location_zip),
         service_of_process: agent(s(r.dos_process_name), joinAddr(r.dos_process_address_1, r.dos_process_address_2, r.dos_process_city, r.dos_process_state, r.dos_process_zip)),
         registered_agent: agent(
@@ -194,7 +222,7 @@ const CO: StateSource = {
         registered_agent: agent(
           agentName,
           joinAddr(r.agentprincipaladdress1, r.agentprincipaladdress2, r.agentprincipalcity, r.agentprincipalstate, r.agentprincipalzipcode),
-          agentOrg ? "organization" : agentName ? "individual" : undefined,
+          agentOrg ? undefined : agentName ? "individual" : undefined,
         ),
         details_url: `https://www.coloradosos.gov/biz/BusinessEntityDetail.do?masterFileId=${s(r.entityid)}`,
         source_url: src(s(r.entityid)!),
@@ -248,7 +276,7 @@ const OR: StateSource = {
         principal_address: pp ? joinAddr(pp.address, pp.address_continued, pp.city, pp.state, pp.zip) : undefined,
         mailing_address: ma ? joinAddr(ma.address, ma.address_continued, ma.city, ma.state, ma.zip) : undefined,
         registered_agent: ra
-          ? agent(raName, joinAddr(ra.address, ra.address_continued, ra.city, ra.state, ra.zip), raPerson && !raOrg ? "individual" : raOrg ? (looksLikeOrganization(raOrg) ? "organization" : undefined) : undefined)
+          ? agent(raName, joinAddr(ra.address, ra.address_continued, ra.city, ra.state, ra.zip), raPerson && !raOrg ? "individual" : undefined)
           : undefined,
         details_url: det?.url?.replace(/^http:/, "https:"),
         source_url: src(id),

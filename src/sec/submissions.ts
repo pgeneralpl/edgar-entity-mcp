@@ -199,7 +199,7 @@ export async function listFilings(
     if (matched.length >= need) break;
     if (flt.dateFrom && f.filingTo < flt.dateFrom) continue;
     if (flt.dateTo && f.filingFrom > flt.dateTo) continue;
-    if (pages >= 5) break; // safety bound
+    if (pages >= LIST_MAX_HISTORY_PAGES) break; // safety bound (cost weights in core/quota.ts assume this)
     const page = await getHistoryPage(f.name);
     pages++;
     consume(rowsFromColumns(cik, page));
@@ -215,7 +215,9 @@ export async function listFilings(
 }
 
 /** Max older-history pages scanned by findFiling (each is one SEC request). */
-export const FIND_FILING_MAX_PAGES = 8;
+export const FIND_FILING_MAX_PAGES = 4;
+/** Max older-history pages scanned when listing filings. */
+export const LIST_MAX_HISTORY_PAGES = 4;
 
 /** Find a single filing by accession (searching recent + up to FIND_FILING_MAX_PAGES history pages). */
 export async function findFiling(cik: string | number, accession: string): Promise<FilingRow | null> {

@@ -5,6 +5,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Readable } from "node:stream";
 import { createHttpHandler } from "./handler.js";
+import { config } from "../config.js";
 import { PACKAGE_NAME } from "../version.js";
 import { healthResponse } from "./health.js";
 import { logError } from "../core/errors.js";
@@ -63,6 +64,11 @@ export function originAllowed(origin: string | undefined, allowedHosts: string[]
 const list = (v: string | undefined) => (v ?? "").split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
 
 export function startHttpServer(port = Number(process.env.PORT ?? 3000), host = process.env.HOST ?? "127.0.0.1") {
+  const problem = config().startupProblem;
+  if (problem) {
+    process.stderr.write(`[${PACKAGE_NAME}] refusing to start: ${problem}\n`);
+    process.exit(1);
+  }
   const handler = createHttpHandler();
   const allowedHosts = [...LOCAL_HOSTS, ...list(process.env.ALLOWED_HOSTS)];
   const allowedOrigins = list(process.env.ALLOWED_ORIGINS);
@@ -80,6 +86,7 @@ export function startHttpServer(port = Number(process.env.PORT ?? 3000), host = 
       // The client IP comes from the socket unless we're explicitly behind a trusted proxy.
       if (!trustProxy) {
         delete req.headers["x-forwarded-for"];
+        delete req.headers["x-vercel-forwarded-for"];
         req.headers["x-real-ip"] = req.socket.remoteAddress ?? "unknown";
       }
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);

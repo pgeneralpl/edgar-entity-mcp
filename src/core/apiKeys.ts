@@ -3,46 +3,90 @@ import type { Redis } from "@upstash/redis";
 import { LRUCache } from "lru-cache";
 import { config } from "../config.js";
 import { getRedis } from "./cache.js";
-import { logError } from "./errors.js";
+import { markRedisDegraded, redisDegraded } from "./degraded.js";
 import { utcDay, type Principal } from "./quota.js";
 
-/** Free API keys look like `eem_` + 32 base62 chars. Only their SHA-256 is stored. */
-export const KEY_RE = /^eem_[A-Za-z0-9]{32}$/;
+/**
+ * Self-verifying API keys: `eem_<id>_<mac>` where id is 12 random base62 chars and mac is
+ * HMAC-SHA256(API_KEY_SECRET, id) truncated to 24 hex chars. Forged or random keys are rejected
+ * locally (no Redis command); only MAC-valid keys are looked up, to check they were not revoked.
+ */
+export const KEY_RE = /^eem_([A-Za-z0-9]{12})_([0-9a-f]{24})$/;
+const ID_RE = /^[A-Za-z0-9]{12}$/;
 
 export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
-export function generateApiKey(): string {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  const bytes = randomBytes(64);
-  let out = "";
-  for (const b of bytes) {
-    if (b < 248) out += alphabet[b % 62]; // rejection sampling keeps the distribution uniform
-    if (out.length === 32) break;
-  }
-  if (out.length < 32) return generateApiKey();
-  return `eem_${out}`;
+function keyMac(id: string): string {
+  return createHmac("sha256", config().apiKeySecret).update(id).digest("hex").slice(0, 24);
 }
 
+function randomId(len = 12): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  while (out.length < len) for (const b of randomBytes(32)) if (b < 248 && out.length < len) out += alphabet[b % 62]; // unbiased
+  return out;
+}
+
+export function generateApiKey(): { key: string; id: string } {
+  const id = randomId();
+  return { key: `eem_${id}_${keyMac(id)}`, id };
+}
+
+/** Parse and verify the MAC. Returns the key id, or null for anything forged or malformed. */
+export function parseApiKey(key: string): string | null {
+  const m = KEY_RE.exec(key);
+  if (!m) return null;
+  const a = Buffer.from(m[2]!, "hex");
+  const b = Buffer.from(keyMac(m[1]!), "hex");
+  return a.length === b.length && timingSafeEqual(a, b) ? m[1]! : null;
+}
+
+/**
+ * Stored per key (Redis `<prefix>apikey:<id>`): creation date and optional custom limits only.
+ * No owner name, email or other contact is collected; the key request (e.g. a GitHub issue) is the
+ * only place that links a holder to a key id, and the operator can delete either independently.
+ */
 export interface KeyRecord {
-  name: string;
-  created: string;
+  created: string; // YYYY-MM-DD
   per_day?: number;
   per_minute?: number;
-  disabled?: boolean;
 }
 
-export const apiKeyRedisKey = (hash: string) => `${config().cachePrefix}apikey:${hash}`;
+export const apiKeyRedisKey = (id: string) => `${config().cachePrefix}apikey:${id}`;
 
-export async function storeApiKey(redis: Redis, key: string, rec: KeyRecord): Promise<string> {
-  const hash = sha256(key);
-  await redis.set(apiKeyRedisKey(hash), JSON.stringify(rec));
-  return hash;
+export async function storeApiKey(redis: Redis, id: string, rec: KeyRecord): Promise<void> {
+  await redis.set(apiKeyRedisKey(id), JSON.stringify(rec));
 }
 
-export async function revokeApiKey(redis: Redis, keyOrHash: string): Promise<boolean> {
-  const hash = KEY_RE.test(keyOrHash) ? sha256(keyOrHash) : keyOrHash;
-  return (await redis.del(apiKeyRedisKey(hash))) > 0;
+/** Resolve "eem_<id>_<mac>" or a bare id to the id. */
+export function keyIdOf(keyOrId: string): string | null {
+  if (ID_RE.test(keyOrId)) return keyOrId;
+  return KEY_RE.exec(keyOrId)?.[1] ?? null;
 }
+
+/**
+ * Delete a key: its record and any of its quota counters still alive (today's and yesterday's day
+ * counters, minute counters). After this nothing about the key remains in Redis.
+ */
+export async function deleteApiKey(redis: Redis, keyOrId: string): Promise<{ record: boolean; counters: number }> {
+  const id = keyIdOf(keyOrId);
+  if (!id) throw new Error("Not an API key or key id.");
+  const record = (await redis.del(apiKeyRedisKey(id))) > 0;
+  const prefix = config().cachePrefix;
+  let counters = 0;
+  for (const pattern of [`${prefix}q:d:key:${id}:*`, `${prefix}q:m:key:${id}:*`]) {
+    let cursor = "0";
+    do {
+      const [next, keys] = await redis.scan(cursor, { match: pattern, count: 500 });
+      cursor = String(next);
+      if (keys.length) counters += await redis.del(...keys);
+    } while (cursor !== "0");
+  }
+  memo.delete(id);
+  return { record, counters };
+}
+/** @deprecated use deleteApiKey */
+export const revokeApiKey = async (redis: Redis, keyOrId: string) => (await deleteApiKey(redis, keyOrId)).record;
 
 const memo = new LRUCache<string, Principal | false>({ max: 10_000, ttl: 5 * 60_000 });
 
@@ -52,45 +96,63 @@ function envKeyMatch(key: string): boolean {
 }
 
 /**
- * Resolve an API key to a principal, or null if invalid. Keys from MCP_API_KEYS are accepted as-is;
- * others must be well-formed and present in Redis. Results are memoised per instance
- * (valid: 5 min, invalid: 1 min) so repeated requests cost no Redis commands.
+ * Resolve an API key to a principal, or null if invalid.
+ * - MCP_API_KEYS (static) keys: accepted as-is, no Redis.
+ * - Minted keys: MAC verified locally first; forged/random keys cost nothing. A MAC-valid key is
+ *   looked up once (to honour deletion and per-key limits) and memoised (valid 5 min, deleted 1 min).
+ * - Redis unavailable: degraded mode accepts MAC-valid keys with default key limits (`unverified`),
+ *   because a deleted key could otherwise only be used until Redis recovers.
  */
 export async function verifyApiKey(key: string): Promise<Principal | null> {
-  const hash = sha256(key);
-  const hit = memo.get(hash);
+  if (envKeyMatch(key)) return { id: `key:env${sha256(key).slice(0, 12)}`, tier: "key" };
+  const id = parseApiKey(key);
+  if (!id) return null;
+  const hit = memo.get(id);
   if (hit !== undefined) return hit || null;
+  const redis = getRedis();
+  if (!redis) return null; // minted keys need the key registry
+  if (redisDegraded()) return { id: `key:${id}`, tier: "key", unverified: true };
   let p: Principal | false = false;
-  if (envKeyMatch(key)) p = { id: `key:${hash.slice(0, 16)}`, tier: "key" };
-  else if (KEY_RE.test(key)) {
-    const redis = getRedis();
-    if (redis) {
-      try {
-        const raw = await redis.get<string>(apiKeyRedisKey(hash));
-        if (raw) {
-          const rec = (typeof raw === "string" ? JSON.parse(raw) : raw) as KeyRecord;
-          if (!rec.disabled) p = { id: `key:${hash.slice(0, 16)}`, tier: "key", perDay: rec.per_day, perMinute: rec.per_minute };
-        }
-      } catch (e) {
-        logError("api-key-lookup", e);
-        throw e; // let the caller fail closed rather than silently downgrading
-      }
+  try {
+    const raw = await redis.get<string>(apiKeyRedisKey(id));
+    if (raw) {
+      const rec = (typeof raw === "string" ? JSON.parse(raw) : raw) as KeyRecord;
+      p = { id: `key:${id}`, tier: "key", perDay: rec.per_day, perMinute: rec.per_minute };
     }
+  } catch (e) {
+    markRedisDegraded(e);
+    return { id: `key:${id}`, tier: "key", unverified: true };
   }
-  memo.set(hash, p, { ttl: p ? 5 * 60_000 : 60_000 });
+  memo.set(id, p, { ttl: p ? 5 * 60_000 : 60_000 });
   return p || null;
 }
 
 export function clearApiKeyMemo(): void {
   memo.clear();
+  failures.clear();
 }
 
-/** Best-effort client IP. On Vercel, x-real-ip / x-forwarded-for are set by the platform. */
+/**
+ * In-memory limiter for failed key attempts per client (hashed IP), in front of any Redis work:
+ * after MAX_KEY_FAILURES bad keys in 10 minutes the client gets 429 without further checks.
+ */
+export const MAX_KEY_FAILURES = 10;
+const failures = new LRUCache<string, number>({ max: 50_000, ttl: 10 * 60_000 });
+export function keyFailuresExceeded(clientId: string): boolean {
+  return (failures.get(clientId) ?? 0) >= MAX_KEY_FAILURES;
+}
+export function recordKeyFailure(clientId: string): void {
+  failures.set(clientId, (failures.get(clientId) ?? 0) + 1, { noUpdateTTL: failures.has(clientId) });
+}
+
+/**
+ * Client IP. On Vercel, x-vercel-forwarded-for is set by the platform and cannot be supplied by the
+ * client; x-forwarded-for (first hop) and x-real-ip follow. The self-hosted node server overwrites
+ * these from the socket unless TRUST_PROXY=1.
+ */
 export function clientIp(req: Request): string {
-  const real = req.headers.get("x-real-ip")?.trim();
-  if (real) return real;
-  const xff = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return xff || "unknown";
+  const first = (h: string) => req.headers.get(h)?.split(",")[0]?.trim() || undefined;
+  return first("x-vercel-forwarded-for") ?? first("x-forwarded-for") ?? first("x-real-ip") ?? "unknown";
 }
 
 const saltMemo = new Map<string, string>();

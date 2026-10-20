@@ -1,7 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import { getText, derived } from "../core/http.js";
 import { toToolError } from "../core/errors.js";
-import { stripInvisible } from "./documents.js";
+import { stripInvisible } from "../core/untrusted.js";
 import { TTL } from "../core/cache.js";
 import { archiveBase, compact } from "../core/util.js";
 import { listFilings, type FilingRow } from "./submissions.js";
@@ -255,6 +255,7 @@ export async function getInsiderTrades(o: InsiderOptions) {
         roles: [...new Set(p.reporters.flatMap((x) => x.roles))].join(", "),
         officer_title: p.reporters.map((x) => x.officer_title).filter(Boolean).join("; "),
         rule_10b5_1: p.rule_10b5_1 || undefined,
+        remarks: o.includeFootnotes && p.remarks ? stripInvisible(p.remarks) : undefined,
         transactions: txs.map((t) => {
           const { footnotes, derivative, code_meaning: _m, ...rest } = t;
           if (t.code) codesSeen.add(t.code);

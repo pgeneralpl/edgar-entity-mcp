@@ -4,7 +4,7 @@ import { registerAll, SERVER_INSTRUCTIONS, warnIfDefaultUserAgent } from "../ser
 import { config } from "../config.js";
 import { getUserUsageHooks, setSystemUsageHook, setUsageHooks, stderrUsageLogger } from "../core/usage.js";
 import { chargeQuota, type Principal, type QuotaStore } from "../core/quota.js";
-import { clientIp, ipPrincipal, verifyApiKey } from "../core/apiKeys.js";
+import { clientIp, ipPrincipal, keyFailuresExceeded, recordKeyFailure, verifyApiKey } from "../core/apiKeys.js";
 import { logError } from "../core/errors.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
 
@@ -51,6 +51,8 @@ export async function readBodyCapped(req: Request, maxBytes: number): Promise<st
  *   Without a key the caller is anonymous (identified by hashed IP) unless MCP_REQUIRE_API_KEY=1.
  * - Every tool call is charged against per-minute and per-day unit quotas (see core/quota.ts).
  */
+let startupLogged = false;
+
 export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request) => Promise<Response> {
   const c = config();
   if (c.usageLog && !getUserUsageHooks().afterCall) setUsageHooks(stderrUsageLogger);
@@ -69,6 +71,11 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
   const verify = opts.verifyKey ?? verifyApiKey;
 
   return async (req: Request) => {
+    // B2: refuse to serve with a weak/public IP hash salt while Redis (persistent state) is on.
+    if (c.startupProblem) {
+      if (!startupLogged) startupLogged = !!logError("startup", new Error(c.startupProblem));
+      return rpcError(503, -32000, "Server misconfigured; refusing to serve. The operator has been notified in the logs.");
+    }
     let body: string | undefined;
     if (req.method === "POST") {
       const text = await readBodyCapped(req, c.maxBodyBytes);
@@ -88,13 +95,20 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
     let principal: Principal | null;
     let token: string;
     if (key) {
+      // In-memory limiter in front of any Redis work: too many bad keys from one client -> 429.
+      const ipId = ipPrincipal(clientIp(req)).id;
+      if (keyFailuresExceeded(ipId))
+        return rpcError(429, -32001, "Too many invalid API keys from this client. Try again later.", undefined, { "retry-after": "600" });
       try {
         principal = await verify(key);
       } catch (e) {
         logError("auth", e);
         return rpcError(503, -32000, "Authentication is temporarily unavailable. Retry shortly.", undefined, { "retry-after": "5" });
       }
-      if (!principal) return rpcError(401, -32001, "Invalid API key.", { hint: `Check the key, or omit it to use the anonymous tier. Free keys: ${c.keyRequestUrl}` }, { "www-authenticate": 'Bearer error="invalid_token"' });
+      if (!principal) {
+        recordKeyFailure(ipId);
+        return rpcError(401, -32001, "Invalid API key.", { hint: `Check the key, or omit it to use the anonymous tier. Free keys: ${c.keyRequestUrl}` }, { "www-authenticate": 'Bearer error="invalid_token"' });
+      }
       token = key;
     } else {
       if (c.requireApiKey) return rpcError(401, -32001, "An API key is required.", { hint: `Request a free key at ${c.keyRequestUrl}` }, { "www-authenticate": "Bearer" });

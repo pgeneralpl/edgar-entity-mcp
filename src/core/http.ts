@@ -1,7 +1,8 @@
 import { config } from "../config.js";
 import { cached, getRedis, type CacheOptions } from "./cache.js";
 import { HttpError, ToolError } from "./errors.js";
-import { RateLimiter, upstashTokenBucket } from "./rateLimiter.js";
+import { ClientSlots, RateLimiter, upstashTokenBucket } from "./rateLimiter.js";
+import { currentContext } from "./context.js";
 
 export type Source = "sec" | "socrata";
 
@@ -9,17 +10,27 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 let secLimiter: RateLimiter | undefined;
 let socrataLimiter: RateLimiter | undefined;
+let slots: ClientSlots | undefined;
 
 function limiterFor(source: Source): RateLimiter {
   const c = config();
   const distributed = process.env.DISTRIBUTED_RATE_LIMIT !== "0" && process.env.SEC_DISTRIBUTED_RATE_LIMIT !== "0";
   const redis = distributed ? getRedis() : undefined;
   if (source === "sec") {
-    if (!secLimiter) secLimiter = new RateLimiter(c.secMaxRps, redis ? upstashTokenBucket(redis, c.secMaxRps, "sec") : undefined, { name: "SEC" });
+    if (!secLimiter) {
+      // H-a: part of the fleet SEC budget is reserved for API-key callers.
+      const reserved = c.secKeyedReservedRps;
+      const shared = Math.max(1, c.secMaxRps - reserved);
+      secLimiter = new RateLimiter(
+        c.secMaxRps,
+        redis ? { shared: upstashTokenBucket(redis, shared, "sec"), reserved: reserved > 0 ? upstashTokenBucket(redis, reserved, "sec-keyed") : undefined } : undefined,
+        { name: "SEC", degradedRps: c.degradedSecRps },
+      );
+    }
     return secLimiter;
   }
   if (!socrataLimiter)
-    socrataLimiter = new RateLimiter(c.socrataMaxRps, redis ? upstashTokenBucket(redis, c.socrataMaxRps, "socrata") : undefined, { name: "state-registry" });
+    socrataLimiter = new RateLimiter(c.socrataMaxRps, redis ? upstashTokenBucket(redis, c.socrataMaxRps, "socrata") : undefined, { name: "state-registry", degradedRps: 2 });
   return socrataLimiter;
 }
 
@@ -27,6 +38,12 @@ function limiterFor(source: Source): RateLimiter {
 export function resetLimiters(): void {
   secLimiter = undefined;
   socrataLimiter = undefined;
+  slots = undefined;
+}
+
+function clientSlots(): ClientSlots {
+  if (!slots) slots = new ClientSlots(config().maxConcurrentUpstreamPerClient);
+  return slots;
 }
 
 /** Stats for observability / tests. */
@@ -141,6 +158,11 @@ export interface FetchOptions {
 /** Raw fetch with rate limiting, retry/backoff on 429/5xx, manual redirects (host re-checked), body cap. No caching. */
 export async function fetchRaw(url: string, source: Source, opts: FetchOptions = {}): Promise<string> {
   if (source === "sec") assertSecUserAgent();
+  const ctx = currentContext();
+  return clientSlots().run(ctx?.transport === "http" ? ctx.principal?.id : undefined, () => fetchRawInner(url, source, opts, ctx?.principal?.tier ?? "anon"));
+}
+
+async function fetchRawInner(url: string, source: Source, opts: FetchOptions, tier: "anon" | "key"): Promise<string> {
   let target = assertAllowedUrl(url, source);
   const maxAttempts = opts.maxAttempts ?? 4;
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -148,7 +170,7 @@ export async function fetchRaw(url: string, source: Source, opts: FetchOptions =
   let lastErr: unknown;
   let redirects = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    await limiter.acquire(); // throws RATE_LIMITED (fail closed) when the shared budget is unavailable
+    await limiter.acquire(tier); // RATE_LIMITED when the fleet budget is exhausted; degraded local rate if Redis is down
     httpStats.requests++;
     try {
       const res = await fetch(target, {
