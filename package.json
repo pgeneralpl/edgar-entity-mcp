@@ -1,6 +1,6 @@
 {
   "name": "edgar-entity-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for US company research: SEC EDGAR filings, XBRL financials, insider trades (Form 4) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA).",
   "type": "module",
   "license": "MIT",
@@ -72,6 +72,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "^2.3.1",
+    "@upstash/ratelimit": "^2.2.0",
     "@upstash/redis": "^1.39.0",
     "fast-xml-parser": "^5.11.2",
     "html-to-text": "^10.0.1",

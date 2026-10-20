@@ -125,25 +125,27 @@ Quick check: `npx -y edgar-entity-mcp --version`
 
 ### Remote (Streamable HTTP)
 
-Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health (add `?deep=1` for a Redis reachability check). The hosted instance uses Upstash Redis for a shared cache and a fleet-wide SEC budget of 8 req/s.
+Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses Upstash Redis for a shared cache, a fleet-wide SEC budget of 6 req/s, and per-client quotas (see [Hosted quotas](#hosted-quotas-and-api-keys)).
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
 ```
-For clients that only speak stdio: `"command": "npx", "args": ["-y", "mcp-remote", "https://edgar-entity-mcp.vercel.app/mcp"]`. If the deployment sets `MCP_API_KEYS`, send `Authorization: Bearer <key>` or `x-api-key: <key>`.
+For clients that only speak stdio: `"command": "npx", "args": ["-y", "mcp-remote", "https://edgar-entity-mcp.vercel.app/mcp"]`. With an API key, send `Authorization: Bearer <key>` or `x-api-key: <key>` (mcp-remote: `--header "Authorization: Bearer <key>"`).
 
 ### Self-host the HTTP server
 
 ```bash
-npm run build && PORT=3000 SEC_USER_AGENT="Acme you@acme.com" npm run start:http   # → http://localhost:3000/mcp
+npm run build && PORT=3000 SEC_USER_AGENT="Acme you@acme.com" npm run start:http   # → http://127.0.0.1:3000/mcp
 ```
+
+The node server binds `127.0.0.1` by default and only answers requests whose `Host` is localhost (DNS-rebinding protection) and whose `Origin`, if any, is local. To expose it, set `HOST=0.0.0.0`, `ALLOWED_HOSTS=mcp.example.com`, optionally `ALLOWED_ORIGINS`, and `TRUST_PROXY=1` only when a reverse proxy sets `X-Forwarded-For`/`X-Real-IP`.
 
 ### Deploy to Vercel
 
 The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions with a Web-standard handler built on [`mcp-handler`](https://www.npmjs.com/package/mcp-handler)) and `vercel.json`, which runs `npm run build` and rewrites `/mcp` to `/api/mcp` and `/health` to `/api/health`. `npm run smoke:remote -- https://<project>.vercel.app/mcp` runs a live check against a deployment.
 
-1. `vercel link` then `vercel env add SEC_USER_AGENT` (and optionally the Upstash / `MCP_API_KEYS` variables).
-2. Recommended: add the **Upstash Redis** integration. The cache is then shared across instances, and the SEC rate budget becomes fleet-wide rather than per instance.
+1. `vercel link` then `vercel env add SEC_USER_AGENT` (plus `HEALTH_SECRET`, `IP_HASH_SALT`, optionally `SOCRATA_APP_TOKEN` / `MCP_API_KEYS`).
+2. Strongly recommended: add the **Upstash Redis** integration. The cache, the SEC/state rate budgets and the per-client quotas then become fleet-wide; without it they are per instance. In the Upstash console enable eviction (`allkeys-lru`) and usage alerts.
 3. `vercel deploy --prod`. Point clients at `https://<project>.vercel.app/mcp`.
 
 ---
@@ -152,27 +154,74 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 
 | Var | Default | Purpose |
 |---|---|---|
-| `SEC_USER_AGENT` | `edgar-entity-mcp/<ver> contact@example.com` | **Set this.** SEC requires a descriptive UA with contact info, e.g. `"Acme Research jane@acme.com"`. The server prints a warning to stderr while the default is in use. |
-| `SEC_MAX_RPS` | `8` (max 9) | SEC requests per second, per process |
-| `SEC_DISTRIBUTED_RATE_LIMIT` | `1` | With Upstash configured, also caps SEC calls across all instances, using a per-second Redis counter |
-| `SOCRATA_APP_TOKEN` | – | Optional app token for state portals (higher throttling limits) |
-| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | – | Enables the Redis cache (Vercel's `KV_REST_API_URL`/`KV_REST_API_TOKEN` also work). Without them the cache is an in-memory LRU. |
-| `MCP_API_KEYS` | – | Comma-separated keys. When set, the HTTP endpoint returns 401 to requests without a valid key. |
-| `USAGE_LOG` | – | `1` logs per-call usage JSON (tool, latency, ok, response size, key prefix) to stderr |
+| `SEC_USER_AGENT` | – (required) | **Set this** to your own `"<Name or Company> <email>"`, e.g. `"Acme Research jane@acme.com"`. SEC tools refuse to run (`CONFIG_ERROR`) while it is unset or a placeholder; state-registry tools still work. |
+| `SEC_MAX_RPS` | `6` (max 8) | SEC requests per second: per process, and fleet-wide when Redis is configured |
+| `SOCRATA_MAX_RPS` | `5` | State-portal requests per second (same two-stage limiter) |
+| `DISTRIBUTED_RATE_LIMIT` | `1` | `0` disables the Redis token buckets (per-process limits only) |
+| `SOCRATA_APP_TOKEN` | – | App token for the state portals (higher throttling limits; free at each portal's developer settings) |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | – | Enables Redis (Vercel's `KV_REST_API_URL`/`KV_REST_API_TOKEN` also work). Without them cache and quotas are in-memory. |
+| `QUOTA_ANON_PER_MINUTE` / `QUOTA_ANON_PER_DAY` | `30` / `300` | HTTP quota for anonymous clients, in units, per hashed IP |
+| `QUOTA_KEY_PER_MINUTE` / `QUOTA_KEY_PER_DAY` | `120` / `5000` | HTTP quota per API key (per-key overrides via `scripts/create-key.ts`) |
+| `MCP_API_KEYS` | – | Comma-separated static keys (accepted alongside hashed keys stored in Redis) |
+| `MCP_REQUIRE_API_KEY` | – | `1` rejects anonymous HTTP calls with 401 (0.1.x required a key whenever `MCP_API_KEYS` was set) |
+| `KEY_REQUEST_URL` | GitHub issue link | Shown in RATE_LIMITED hints as the place to request a free key |
+| `IP_HASH_SALT` | built-in | Salt for hashing client IPs before they are used as quota keys. Set a random value in production. |
+| `HEALTH_SECRET` | – | Enables `/health?deep=1` (Redis ping) for requests sending `x-health-secret: <value>` |
+| `SUPPRESSION_FILE` | – | JSON array of suppression entries (see [Privacy](#privacy-and-personal-data)) |
+| `MAX_BODY_BYTES` / `MAX_DOCUMENT_BYTES` | 65536 / 15 MB | HTTP request body cap / max filing document size |
+| `USAGE_LOG` | – | `1` logs per-call usage JSON (tool, latency, ok, response size, hashed principal) to stderr |
 | `MEMORY_CACHE_MB` / `REDIS_MAX_VALUE_BYTES` / `HTTP_TIMEOUT_MS` | 128 / 900000 / 25000 | Tuning |
+| `HOST` / `ALLOWED_HOSTS` / `ALLOWED_ORIGINS` / `TRUST_PROXY` | `127.0.0.1` / – / – / – | Self-hosted node server only |
+
+## Hosted quotas and API keys
+
+The hosted endpoint charges each tool call in **units** that approximate how many upstream requests it can trigger:
+
+| Tool | Units |
+|---|---|
+| `list_supported_states` | 0 |
+| `search_company`, `get_company_profile`, `get_xbrl_concept` | 1 |
+| `list_filings` | 1 (3 with date filters or offset, which may page through older history) |
+| `get_financials` | 2 |
+| `compare_companies` | 3 |
+| `get_filing_document` | 3 by `url`, 4 by `company` + `accession` |
+| `get_insider_trades` | 1 + `limit` (max 20 filings → 21) |
+| `lookup_business_entity` | number of states (max 5) |
+
+| Client | Per minute | Per day (UTC) |
+|---|---|---|
+| Anonymous (per IP, IPv6 per /64) | 30 | 300 |
+| Free API key | 120 | 5,000 |
+
+Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the limit, and how to get a key. Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Operators mint them with `npx tsx scripts/create-key.ts --name "<owner + contact>"` (only the SHA-256 is stored) and revoke with `--revoke`. Running locally via `npx -y edgar-entity-mcp` has no quota.
+
+Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
+
+## Privacy and personal data
+
+- Registered agents that are individuals (natural persons) are returned as `{ "kind": "individual", "withheld": true }` unless the caller sets `include_agent_details: true`. Organizational agents are always shown.
+- Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Suppressed data is never returned.
+- Form 4 reporting-owner names are statutory public disclosures and are returned by `get_insider_trades`.
+- **Logs and retention**: the hosted server logs errors and (with `USAGE_LOG=1`) per-call usage to stderr, which lands in Vercel runtime logs and expires under Vercel's plan retention (short on Hobby; see [Vercel log limits](https://vercel.com/docs/logs/runtime#limits)). Logs never contain tool arguments, API keys or raw IPs. Quota/usage counters in Redis are keyed by a salted IP hash or key hash: per-IP counters expire after 2 days, per-key counters after 35 days.
+
+## Security notes
+
+- Filing text from `get_filing_document` is untrusted, filer-authored content. It is returned between `<<<BEGIN UNTRUSTED SEC FILING TEXT>>>` / `<<<END …>>>` markers with `untrusted_content: true`, and zero-width/bidi control characters are stripped. Agents should treat it as data, never as instructions.
+- Only `https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file>` URLs are accepted as document input; redirects are followed manually and re-checked against the host allowlist.
+- Error messages returned to clients are generic; details go to server logs with a reference id.
 
 ## SEC User-Agent and rate limits
 
 SEC's [fair-access policy](https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data) caps clients at **10 requests/second** and requires a declared User-Agent. SEC may block clients without one (HTTP 403 "Undeclared Automated Tool"). This server:
 - sends `SEC_USER_AGENT` on every SEC request;
-- spaces requests through a global limiter at ~8 req/s by default (measured: 41 requests in 5.0s while parsing 40 Form 4s);
+- spaces requests through a two-stage limiter: per-process spacing plus, with Redis, an atomic fleet-wide token bucket (6 req/s default). If Redis is unreachable or no token is granted within ~5 s, the call fails with `RATE_LIMITED` rather than exceeding the budget;
 - retries 429/5xx with exponential backoff and respects `Retry-After`;
-- deduplicates identical in-flight requests and caches with TTLs: tickers 24h, submissions 10 min, companyfacts/concepts 6h, frames 12h, filing documents 30 days (filings are immutable), state searches 1h.
+- deduplicates identical in-flight requests and caches with TTLs: tickers 24h, submissions 10 min, companyfacts/concepts 6h, frames 12h, filing documents 30 days in process memory (raw documents are never written to Redis; processed text under 256 KB and parsed Form 4s are shared for 7 days), state searches 1h.
 
 ## Monetization hooks (no billing yet)
 
-- **HTTP gate**: `MCP_API_KEYS` (static keys), or `createHttpHandler({ verifyKey: async (k) => lookup(k) })` for keys stored in a database. Keys are checked with `mcp-handler`'s `withMcpAuth` and return RFC 9728-style 401 responses.
-- **Per-call metering**: `setUsageHooks({ beforeCall, afterCall })` (exported from the package). `beforeCall` receives `{tool, transport, apiKey, clientId}`; throwing from it rejects the call with `UNAUTHORIZED`, which covers quotas and credits. `afterCall` receives `{ok, ms, errorCode, responseChars}`, which is enough for pay-per-call or per-token pricing.
+- **HTTP gate**: hashed keys in Redis (`scripts/create-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401.
+- **Per-call metering**: `setUsageHooks({ beforeCall, afterCall })` (exported from the package). `beforeCall` receives `{tool, transport, apiKey, clientId, principal, args}`; throwing a `ToolError` rejects the call with that code (anything else becomes `UNAUTHORIZED`). The built-in quota hook runs first. `afterCall` receives `{ok, ms, errorCode, responseChars}`, which is enough for pay-per-call or per-token pricing.
 - Suggested tiers: free (stdio or keyless HTTP, cached), Pro (API key, higher limits, bulk/paginated exports), Team (webhooks for new filings or insider trades).
 
 ## Data sources & licenses

@@ -1,39 +1,61 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "../config.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
 import { SUPPORTED_STATES } from "../states/registry.js";
 import { getRedis } from "../core/cache.js";
+import { logError } from "../core/errors.js";
 
 /** Public health payload. Reports configuration *shape* only, never secret values. */
 export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
   const c = loadConfig(env);
+  const redis = !!(c.upstashUrl && c.upstashToken);
   return {
     status: "ok",
     name: PACKAGE_NAME,
     version: VERSION,
     mcp_endpoint: "/mcp",
-    cache: c.upstashUrl && c.upstashToken ? "upstash+memory" : "memory",
+    cache: redis ? "upstash+memory" : "memory",
     sec_rate_limit: {
       rps: c.secMaxRps,
-      scope: c.upstashUrl && c.upstashToken && env.SEC_DISTRIBUTED_RATE_LIMIT !== "0" ? "fleet (redis)" : "instance",
+      scope: redis && env.SEC_DISTRIBUTED_RATE_LIMIT !== "0" && env.DISTRIBUTED_RATE_LIMIT !== "0" ? "fleet (redis)" : "instance",
     },
-    sec_user_agent_configured: !c.secUserAgentIsDefault,
-    auth_required: Boolean(env.MCP_API_KEYS?.trim()),
+    quotas: {
+      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay },
+      api_key: { units_per_minute: c.quota.keyPerMinute, units_per_day: c.quota.keyPerDay },
+    },
+    sec_user_agent_configured: c.secUserAgentValid,
+    auth_required: c.requireApiKey,
     states: SUPPORTED_STATES,
   };
 }
 
-/** `?deep=1` adds a single Redis PING so operators can confirm the cache backend is reachable. */
-export async function healthResponse(req?: Request): Promise<Response> {
-  const body: Record<string, unknown> = healthPayload();
+function secretMatches(given: string | null, secret: string | undefined): boolean {
+  if (!secret || !given) return false;
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(secret).digest();
+  return timingSafeEqual(a, b);
+}
+
+/**
+ * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds a Redis PING.
+ * Without a matching secret the deep check is silently skipped. Errors are never echoed.
+ */
+export async function healthResponse(req?: Request, env: NodeJS.ProcessEnv = process.env): Promise<Response> {
+  const body: Record<string, unknown> = healthPayload(env);
   if (req && new URL(req.url).searchParams.get("deep") === "1") {
-    const redis = getRedis();
-    if (!redis) body.redis = "not configured";
-    else {
-      const t0 = Date.now();
-      try {
-        body.redis = { ok: (await redis.ping()) === "PONG", ms: Date.now() - t0 };
-      } catch (e) {
-        body.redis = { ok: false, error: (e as Error).message.slice(0, 200) };
+    if (!secretMatches(req.headers.get("x-health-secret"), loadConfig(env).healthSecret)) {
+      body.deep = "skipped (requires x-health-secret)";
+    } else {
+      const redis = getRedis();
+      if (!redis) body.redis = "not configured";
+      else {
+        const t0 = Date.now();
+        try {
+          body.redis = { ok: (await redis.ping()) === "PONG", ms: Date.now() - t0 };
+        } catch (e) {
+          logError("health-redis", e);
+          body.redis = { ok: false };
+        }
       }
     }
   }

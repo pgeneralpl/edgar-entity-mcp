@@ -1,5 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
-import { getText } from "../core/http.js";
+import { getText, derived } from "../core/http.js";
+import { toToolError } from "../core/errors.js";
+import { stripInvisible } from "./documents.js";
 import { TTL } from "../core/cache.js";
 import { archiveBase, compact } from "../core/util.js";
 import { listFilings, type FilingRow } from "./submissions.js";
@@ -197,10 +199,15 @@ export async function getInsiderTrades(o: InsiderOptions) {
       const url = form4XmlUrl(f, o.cik);
       if (!url || !/\.xml$/i.test(url)) return { f, error: "no XML document" as const };
       try {
-        const xml = await getText(url, "sec", TTL.filingDoc);
-        return { f, url, parsed: parseForm4(xml) };
+        // Raw XML stays in process memory; the small parsed result is shared.
+        const parsed = await derived(`form4:${url}`, TTL.filingDocShared, async () =>
+          parseForm4(await getText(url, "sec", TTL.filingDoc, { tier: "memory", maxBytes: 2 * 1024 * 1024 })),
+        );
+        return { f, url, parsed };
       } catch (e) {
-        return { f, error: (e as Error).message };
+        const te = toToolError(e);
+        if (te.code === "RATE_LIMITED" || te.code === "CONFIG_ERROR") throw te;
+        return { f, error: te.message };
       }
     }),
   );
@@ -253,7 +260,7 @@ export async function getInsiderTrades(o: InsiderOptions) {
           if (t.code) codesSeen.add(t.code);
           return { ...rest, derivative: derivative || undefined, footnotes: o.includeFootnotes && footnotes?.length ? footnotes : undefined };
         }),
-        footnotes: o.includeFootnotes && usedNotes.size ? Object.fromEntries([...usedNotes].map((id) => [id, p.footnotes[id]?.slice(0, 400)])) : undefined,
+        footnotes: o.includeFootnotes && usedNotes.size ? Object.fromEntries([...usedNotes].map((id) => [id, p.footnotes[id] ? stripInvisible(p.footnotes[id]!).slice(0, 400) : undefined])) : undefined,
         url: r.url,
       }),
     );

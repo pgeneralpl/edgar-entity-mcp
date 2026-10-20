@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryCache, TieredCache, setCache, cached } from "../src/core/cache.js";
 import { RateLimiter } from "../src/core/rateLimiter.js";
-import { fetchRaw, assertSecUrl } from "../src/core/http.js";
+import { fetchRaw, assertSecUrl, resetLimiters } from "../src/core/http.js";
 import { loadConfig, resetConfig } from "../src/config.js";
 import { normalizePeriod } from "../src/sec/xbrl.js";
 import { selectConceptFacts } from "../src/sec/xbrl.js";
@@ -11,6 +11,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetConfig(undefined);
   setCache(undefined);
+  resetLimiters();
 });
 
 describe("cache", () => {
@@ -65,12 +66,15 @@ describe("http", () => {
     expect(() => assertSecUrl("https://evil.example.com/a")).toThrow(/Only https/);
     expect(() => assertSecUrl("http://www.sec.gov/a")).toThrow();
     expect(assertSecUrl("https://www.sec.gov/Archives/x").hostname).toBe("www.sec.gov");
+    expect(assertSecUrl("https://www.sec.gov/Archives/x?bust=1#f").toString()).toBe("https://www.sec.gov/Archives/x");
+    expect(() => assertSecUrl("https://efts.sec.gov/LATEST/search-index?q=x")).toThrow();
   });
   it("config defaults", () => {
     const c = loadConfig({});
-    expect(c.secMaxRps).toBe(8);
+    expect(c.secMaxRps).toBe(6);
     expect(c.secUserAgentIsDefault).toBe(true);
-    expect(loadConfig({ SEC_MAX_RPS: "50" }).secMaxRps).toBe(9);
+    expect(c.secUserAgentValid).toBe(false);
+    expect(loadConfig({ SEC_MAX_RPS: "50" }).secMaxRps).toBe(8);
     expect(loadConfig({ MCP_API_KEYS: "a, b" }).apiKeys).toEqual(["a", "b"]);
   });
 });

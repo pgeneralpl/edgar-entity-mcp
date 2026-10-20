@@ -80,6 +80,7 @@ export class TieredCache implements Cache {
 }
 
 let instance: Cache | undefined;
+let memoryInstance: Cache | undefined;
 let redisClient: Redis | undefined;
 
 export function getRedis(): Redis | undefined {
@@ -89,22 +90,34 @@ export function getRedis(): Redis | undefined {
   return redisClient;
 }
 
+/** Process-local cache (never Redis). */
+export function getMemoryCache(): Cache {
+  if (!memoryInstance) memoryInstance = new MemoryCache(config().memoryCacheMb * 1024 * 1024);
+  return memoryInstance;
+}
+
 export function getCache(): Cache {
   if (instance) return instance;
   const c = config();
-  const mem = new MemoryCache(c.memoryCacheMb * 1024 * 1024);
+  const mem = getMemoryCache();
   const redis = getRedis();
   instance = redis ? new TieredCache(mem, new UpstashCache(redis, c.redisMaxValueBytes)) : mem;
   return instance;
 }
 
-export function setCache(c: Cache | undefined): void {
+export function setCache(c: Cache | undefined, memory?: Cache): void {
   instance = c;
+  memoryInstance = memory ?? (c === undefined ? undefined : memoryInstance);
+}
+
+export interface CacheOptions {
+  /** "shared" (default) = memory + Redis when configured; "memory" = this process only. */
+  tier?: "shared" | "memory";
 }
 
 /** Read-through helper for JSON-serialisable values. */
-export async function cached<T>(key: string, ttlSeconds: number, produce: () => Promise<T>): Promise<T> {
-  const cache = getCache();
+export async function cached<T>(key: string, ttlSeconds: number, produce: () => Promise<T>, opts: CacheOptions = {}): Promise<T> {
+  const cache = opts.tier === "memory" ? getMemoryCache() : getCache();
   const full = config().cachePrefix + key;
   const hit = await cache.get(full);
   if (hit !== undefined) {
@@ -128,6 +141,7 @@ export const TTL = {
   companyFacts: 6 * 3600,
   companyConcept: 6 * 3600,
   frames: 12 * 3600,
-  filingDoc: 30 * 24 * 3600, // filed documents are immutable
+  filingDoc: 30 * 24 * 3600, // filed documents are immutable (memory tier only for raw bodies)
+  filingDocShared: 7 * 24 * 3600, // processed/trimmed text and parsed Form 4s in Redis
   stateSearch: 3600,
 } as const;

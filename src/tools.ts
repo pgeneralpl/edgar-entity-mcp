@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { ToolError } from "./core/errors.js";
+import { ToolError, toToolError } from "./core/errors.js";
+import { UNTRUSTED_NOTICE, wrapUntrusted } from "./core/untrusted.js";
 import { compact } from "./core/util.js";
 import { resolveCompany, searchCompanies } from "./sec/tickers.js";
 import { buildProfile, getSubmissions, listFilings, findFiling } from "./sec/submissions.js";
@@ -100,17 +101,18 @@ export const getFilingDocument = def({
   name: "get_filing_document",
   title: "Read a filing document",
   description:
-    "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
+    "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
   inputSchema: z.object({
-    url: z.string().url().optional().describe("Document URL on www.sec.gov/Archives"),
+    url: z.string().url().max(500).optional().describe("Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings)"),
     company: companyArg.optional(),
-    accession: z.string().optional().describe("Accession number, e.g. 0000320193-24-000123"),
+    accession: z.string().max(30).optional().describe("Accession number, e.g. 0000320193-24-000123"),
     section: z.string().max(10).optional().describe("Item id to extract, e.g. '1A', '7', 'Item 7A'"),
     max_chars: z.number().int().min(500).max(100_000).default(20_000),
-    offset: z.number().int().min(0).default(0),
+    offset: z.number().int().min(0).max(20_000_000).default(0),
   }),
   async run(a) {
     let url = a.url;
+    let trusted = false;
     let meta: Record<string, unknown> = {};
     if (!url) {
       if (!a.company || !a.accession) throw new ToolError("INVALID_INPUT", "Provide either url, or company + accession.");
@@ -119,9 +121,12 @@ export const getFilingDocument = def({
       const f = await findFiling(c.cik, acc);
       if (!f || !f.url) throw new ToolError("NOT_FOUND", `Accession ${acc} not found for CIK ${c.cik}.`, "Use list_filings to get valid accession numbers.");
       url = f.url;
+      trusted = true; // built from EDGAR metadata, not user input
       meta = { form: f.form, filed: f.filed, report_date: f.report_date, accession: f.accession, index_url: f.index_url };
     }
-    const { text, kind } = await fetchDocumentText(url);
+    const doc = await fetchDocumentText(url, { trusted });
+    const { text, kind } = doc;
+    url = doc.url;
     let body = text;
     let sectionInfo: Record<string, unknown> | undefined;
     if (a.section) {
@@ -145,7 +150,9 @@ export const getFilingDocument = def({
       total_chars: body.length,
       offset: start,
       next_offset: next,
-      text: chunk,
+      untrusted_content: true,
+      content_notice: UNTRUSTED_NOTICE,
+      text: wrapUntrusted(chunk),
     });
   },
 });
@@ -221,7 +228,7 @@ export const getInsiderTradesTool = def({
     "Recent insider transactions for a company (issuer) from SEC Form 4 / 4/A XML: reporter name, role and officer title, transaction date, code with plain-English meaning (P=open-market buy, S=sale, A=grant, M=option exercise, F=tax withholding, G=gift...), shares, price, value, acquired/disposed, shares owned after, direct/indirect, plus a summary of open-market buys vs sales. `limit` counts filings (each filing can hold several transactions).",
   inputSchema: z.object({
     company: companyArg,
-    limit: z.number().int().min(1).max(40).default(10).describe("Number of most recent Form 4 filings to parse"),
+    limit: z.number().int().min(1).max(20).default(10).describe("Number of most recent Form 4 filings to parse (max 20; each is one SEC request)"),
     include_amendments: z.boolean().default(true),
     date_from: dateStr.optional(),
     date_to: dateStr.optional(),
@@ -245,20 +252,26 @@ export const getInsiderTradesTool = def({
 export const lookupBusinessEntity = def({
   name: "lookup_business_entity",
   title: "State business-entity registry lookup",
-  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available, and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
+  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (individual agents withheld unless include_agent_details=true), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
   inputSchema: z.object({
     name: z.string().min(2).max(200).optional().describe("Entity name or fragment, e.g. 'Tiffany and Company'"),
     entity_id: z.string().min(1).max(40).optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
-    states: z.array(z.enum(SUPPORTED_STATES as [string, ...string[]])).max(10).optional().describe("Default: all supported states"),
+    states: z.array(z.enum(SUPPORTED_STATES as [string, ...string[]])).max(5).optional().describe("Default: all supported states"),
     match: z.enum(["contains", "starts_with", "exact"]).default("contains"),
     active_only: z.boolean().default(false).describe("Exclude dissolved/inactive entities (CO, CT)"),
-    limit: z.number().int().min(1).max(50).default(5).describe("Max results per state"),
+    limit: z.number().int().min(1).max(25).default(5).describe("Max results per state"),
+    include_agent_details: z
+      .boolean()
+      .default(false)
+      .describe("Include names/addresses of registered agents who are individuals (natural persons). Default false: only commercial/organizational agents are shown."),
   }),
   async run(a) {
     if (!a.name && !a.entity_id) throw new ToolError("INVALID_INPUT", "Provide name and/or entity_id.");
-    const states = a.states?.length ? a.states : SUPPORTED_STATES;
+    const states = [...new Set(a.states?.length ? a.states : SUPPORTED_STATES)];
     const settled = await Promise.allSettled(
-      states.map((st) => searchState(st, { name: a.name, entityId: a.entity_id, mode: a.match as MatchMode, limit: a.limit, activeOnly: a.active_only })),
+      states.map((st) =>
+        searchState(st, { name: a.name, entityId: a.entity_id, mode: a.match as MatchMode, limit: a.limit, activeOnly: a.active_only, includeAgentDetails: a.include_agent_details }),
+      ),
     );
     const results: unknown[] = [];
     const byState: Record<string, unknown> = {};
@@ -268,14 +281,18 @@ export const lookupBusinessEntity = def({
         results.push(...r.value.entities);
         byState[st] = { count: r.value.entities.length, query_url: r.value.query_url };
       } else {
-        byState[st] = { error: (r.reason as Error)?.message ?? String(r.reason) };
+        const te = toToolError(r.reason);
+        if (te.code === "RATE_LIMITED") throw te;
+        byState[st] = { error: te.message };
       }
     });
+    const withheld = JSON.stringify(results).includes('"withheld":true');
     return compact({
       query: { name: a.name, entity_id: a.entity_id, match: a.match },
       results,
       by_state: byState,
       notice: states.includes("CO") ? "CO data modified from its original source, the State of Colorado, which makes no warranty; see list_supported_states." : undefined,
+      privacy: withheld ? "Names/addresses of individual (natural-person) agents are withheld by default; pass include_agent_details=true if you have a legitimate need." : undefined,
     });
   },
 });

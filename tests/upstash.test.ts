@@ -43,17 +43,13 @@ describe("Upstash adapters (fake client)", () => {
     await expect(c.set("x", "y", 1)).resolves.toBeUndefined();
     await expect(c.get("x")).resolves.toBeUndefined();
   });
-  it("distributed limiter waits for the next second once the fleet budget is used", async () => {
-    const r = fakeRedis();
-    const rl = new RateLimiter(1000, r as unknown as Redis); // local spacing negligible; Redis budget = 1000/s
-    // Pre-fill this second's counter to the budget
-    const sec = Math.floor(Date.now() / 1000);
-    for (let i = 0; i < 1000; i++) await r.incr(`rl:sec:${sec}`);
+  it("distributed limiter waits for a token when the fleet bucket is empty", async () => {
+    let calls = 0;
+    const bucket = { take: async () => (++calls === 1 ? { ok: false as const, retryAfterMs: 30 } : { ok: true as const }) };
+    const rl = new RateLimiter(1000, bucket);
     const t0 = Date.now();
     await rl.acquire();
-    const waited = Date.now() - t0;
-    // must have rolled into a later second (or the second ended naturally)
-    expect(Math.floor(Date.now() / 1000)).toBeGreaterThan(sec);
-    expect(waited).toBeGreaterThanOrEqual(0);
+    expect(calls).toBe(2);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(25);
   });
 });

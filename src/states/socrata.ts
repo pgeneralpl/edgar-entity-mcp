@@ -3,6 +3,7 @@ import { TTL } from "../core/cache.js";
 import { ToolError } from "../core/errors.js";
 import { STATE_SOURCES, type NormalizedEntity, type StateSource } from "./registry.js";
 import { coreTokens, dice } from "../sec/tickers.js";
+import { applyPrivacy, loadSuppression } from "./suppression.js";
 
 export type MatchMode = "contains" | "starts_with" | "exact";
 
@@ -61,17 +62,18 @@ export function rankEntities(rows: NormalizedEntity[], query?: string): Normaliz
 
 export async function searchState(
   code: string,
-  opts: { name?: string; entityId?: string; mode: MatchMode; limit: number; activeOnly?: boolean },
+  opts: { name?: string; entityId?: string; mode: MatchMode; limit: number; activeOnly?: boolean; includeAgentDetails?: boolean },
 ): Promise<{ entities: NormalizedEntity[]; query_url: string }> {
   const src = STATE_SOURCES[code];
   if (!src) throw new ToolError("UNSUPPORTED", `State ${code} is not supported.`);
   const where = buildWhere(src, opts);
   if (!where) throw new ToolError("INVALID_INPUT", "Provide name or entity_id.");
-  // Over-fetch so we can rank, and to group multi-row datasets.
-  const fetchN = Math.min(1000, Math.max(opts.limit * 3, 25) * (src.multiRow ? (src.rowsPerEntity ?? 4) : 1));
+  // Modest over-fetch so we can rank, and to group multi-row datasets.
+  const fetchN = Math.min(200, Math.max(opts.limit * 2, 10) * (src.multiRow ? (src.rowsPerEntity ?? 4) : 1));
   const url = buildQueryUrl(src, where, fetchN);
   const rows = await getJson<Record<string, unknown>[]>(url, "socrata", TTL.stateSearch);
   if (!Array.isArray(rows)) throw new ToolError("UPSTREAM_ERROR", `Unexpected response from ${src.domain}`);
-  const entities = rankEntities(src.normalize(rows, (id) => rowSourceUrl(src, id)), opts.name).slice(0, opts.limit);
+  const ranked = rankEntities(src.normalize(rows, (id) => rowSourceUrl(src, id)), opts.name).slice(0, opts.limit);
+  const entities = applyPrivacy(ranked, { includeAgentDetails: !!opts.includeAgentDetails, suppression: await loadSuppression() });
   return { entities, query_url: url };
 }

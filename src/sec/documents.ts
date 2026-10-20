@@ -1,6 +1,7 @@
 import { convert } from "html-to-text";
-import { getText, derived, assertSecUrl } from "../core/http.js";
-import { TTL } from "../core/cache.js";
+import { getText, derived, assertSecUrl, validateFilingDocUrl } from "../core/http.js";
+import { TTL, getCache } from "../core/cache.js";
+import { config } from "../config.js";
 import { ToolError } from "../core/errors.js";
 
 /** Remove inline-XBRL hidden header and other non-content blocks before conversion. */
@@ -23,13 +24,23 @@ export function htmlToText(html: string): string {
       { selector: "h2", options: { uppercase: false } },
       { selector: "h3", options: { uppercase: false } },
     ],
-    limits: { maxInputLength: 40_000_000 },
+    limits: { maxInputLength: 16_000_000 },
   });
   return tidy(text);
 }
 
+/**
+ * Invisible / direction-changing characters that can hide instructions from a human reviewer
+ * (zero-width spaces/joiners, bidi embeddings/overrides/isolates, word joiner, BOM, soft hyphen).
+ */
+const INVISIBLE_RE = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g;
+
+export function stripInvisible(text: string): string {
+  return text.replace(INVISIBLE_RE, "");
+}
+
 export function tidy(text: string): string {
-  return text
+  return stripInvisible(text)
     .replace(/\u00a0/g, " ")
     .replace(/^-{10,}$/gm, "---")
     .replace(/\$[ \t]+(?=[\d(])/g, "$")
@@ -122,15 +133,46 @@ export function listSections(text: string): string[] {
   return seen;
 }
 
-/** Fetch an SEC document and return clean text (cached; filed documents are immutable). */
-export async function fetchDocumentText(url: string): Promise<{ text: string; kind: string }> {
-  const u = assertSecUrl(url);
+/** Processed text above this size stays in process memory only (keeps Redis small). */
+export const SHARED_TEXT_MAX_CHARS = 256 * 1024;
+
+/**
+ * Fetch an SEC document and return clean text.
+ * - User-supplied URLs must pass the strict Archives path check (validateFilingDocUrl);
+ *   URLs we built ourselves from EDGAR metadata (`trusted`) only need an allowlisted host.
+ * - Raw bodies are cached in process memory only; processed text is shared via Redis only when small.
+ */
+export async function fetchDocumentText(url: string, opts: { trusted?: boolean } = {}): Promise<{ text: string; kind: string; url: string }> {
+  const canonical = opts.trusted ? assertSecUrl(url).toString() : validateFilingDocUrl(url);
+  const u = new URL(canonical);
   if (/\.pdf$/i.test(u.pathname)) throw new ToolError("UNSUPPORTED", "PDF documents are not supported; open the filing index for HTML/TXT alternatives.");
-  return derived(`doctext:${url}`, TTL.filingDoc, async () => {
-    const raw = await getText(url, "sec", TTL.filingDoc);
+  const produce = async () => {
+    const raw = await getText(canonical, "sec", TTL.filingDoc, { tier: "memory", maxBytes: config().maxDocumentBytes });
     const looksHtml = /\.(x?html?)$/i.test(u.pathname) || /<html|<body|<div|<p[\s>]/i.test(raw.slice(0, 5000));
     if (looksHtml) return { text: htmlToText(raw), kind: "html" };
-    if (/\.xml$/i.test(u.pathname)) return { text: raw, kind: "xml" };
+    if (/\.xml$/i.test(u.pathname)) return { text: stripInvisible(raw), kind: "xml" };
     return { text: tidy(raw), kind: "text" };
-  });
+  };
+  // Memory first (any size); then the shared tier, which only ever holds small processed text.
+  const mem = await derived(
+    `doctext:${canonical}`,
+    TTL.filingDoc,
+    async () => {
+      const cache = getCache();
+      const key = `${config().cachePrefix}doctext-s:${canonical}`;
+      const hit = await cache.get(key);
+      if (hit) {
+        try {
+          return JSON.parse(hit) as { text: string; kind: string };
+        } catch {
+          /* recompute */
+        }
+      }
+      const r = await produce();
+      if (r.text.length <= SHARED_TEXT_MAX_CHARS) await cache.set(key, JSON.stringify(r), TTL.filingDocShared);
+      return r;
+    },
+    { tier: "memory" },
+  );
+  return { ...mem, url: canonical };
 }

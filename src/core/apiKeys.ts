@@ -1,0 +1,114 @@
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { Redis } from "@upstash/redis";
+import { LRUCache } from "lru-cache";
+import { config } from "../config.js";
+import { getRedis } from "./cache.js";
+import { logError } from "./errors.js";
+import type { Principal } from "./quota.js";
+
+/** Free API keys look like `eem_` + 32 base62 chars. Only their SHA-256 is stored. */
+export const KEY_RE = /^eem_[A-Za-z0-9]{32}$/;
+
+export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
+
+export function generateApiKey(): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const bytes = randomBytes(64);
+  let out = "";
+  for (const b of bytes) {
+    if (b < 248) out += alphabet[b % 62]; // rejection sampling keeps the distribution uniform
+    if (out.length === 32) break;
+  }
+  if (out.length < 32) return generateApiKey();
+  return `eem_${out}`;
+}
+
+export interface KeyRecord {
+  name: string;
+  created: string;
+  per_day?: number;
+  per_minute?: number;
+  disabled?: boolean;
+}
+
+export const apiKeyRedisKey = (hash: string) => `${config().cachePrefix}apikey:${hash}`;
+
+export async function storeApiKey(redis: Redis, key: string, rec: KeyRecord): Promise<string> {
+  const hash = sha256(key);
+  await redis.set(apiKeyRedisKey(hash), JSON.stringify(rec));
+  return hash;
+}
+
+export async function revokeApiKey(redis: Redis, keyOrHash: string): Promise<boolean> {
+  const hash = KEY_RE.test(keyOrHash) ? sha256(keyOrHash) : keyOrHash;
+  return (await redis.del(apiKeyRedisKey(hash))) > 0;
+}
+
+const memo = new LRUCache<string, Principal | false>({ max: 10_000, ttl: 5 * 60_000 });
+
+function envKeyMatch(key: string): boolean {
+  const h = Buffer.from(sha256(key), "hex");
+  return config().apiKeys.some((k) => timingSafeEqual(Buffer.from(sha256(k), "hex"), h));
+}
+
+/**
+ * Resolve an API key to a principal, or null if invalid. Keys from MCP_API_KEYS are accepted as-is;
+ * others must be well-formed and present in Redis. Results are memoised per instance
+ * (valid: 5 min, invalid: 1 min) so repeated requests cost no Redis commands.
+ */
+export async function verifyApiKey(key: string): Promise<Principal | null> {
+  const hash = sha256(key);
+  const hit = memo.get(hash);
+  if (hit !== undefined) return hit || null;
+  let p: Principal | false = false;
+  if (envKeyMatch(key)) p = { id: `key:${hash.slice(0, 16)}`, tier: "key" };
+  else if (KEY_RE.test(key)) {
+    const redis = getRedis();
+    if (redis) {
+      try {
+        const raw = await redis.get<string>(apiKeyRedisKey(hash));
+        if (raw) {
+          const rec = (typeof raw === "string" ? JSON.parse(raw) : raw) as KeyRecord;
+          if (!rec.disabled) p = { id: `key:${hash.slice(0, 16)}`, tier: "key", perDay: rec.per_day, perMinute: rec.per_minute };
+        }
+      } catch (e) {
+        logError("api-key-lookup", e);
+        throw e; // let the caller fail closed rather than silently downgrading
+      }
+    }
+  }
+  memo.set(hash, p, { ttl: p ? 5 * 60_000 : 60_000 });
+  return p || null;
+}
+
+export function clearApiKeyMemo(): void {
+  memo.clear();
+}
+
+/** Best-effort client IP. On Vercel, x-real-ip / x-forwarded-for are set by the platform. */
+export function clientIp(req: Request): string {
+  const real = req.headers.get("x-real-ip")?.trim();
+  if (real) return real;
+  const xff = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return xff || "unknown";
+}
+
+/** Hash an IP (IPv6 grouped by /64) so raw addresses never reach Redis or logs. */
+export function ipPrincipal(ip: string): Principal {
+  let norm = ip.toLowerCase();
+  if (norm.includes(":") && !/^::ffff:\d/.test(norm)) {
+    const full = expandIpv6(norm);
+    norm = full ? full.slice(0, 4).join(":") + "::/64" : norm;
+  } else norm = norm.replace(/^::ffff:/, "");
+  return { id: `ip:${sha256(config().ipHashSalt + "|" + norm).slice(0, 20)}`, tier: "anon" };
+}
+
+function expandIpv6(ip: string): string[] | undefined {
+  const [head, tail] = ip.split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail !== undefined ? (tail ? tail.split(":") : []) : [];
+  if (tail === undefined && h.length !== 8) return undefined;
+  const fill = Array(8 - h.length - t.length).fill("0");
+  const all = [...h, ...fill, ...t].map((x) => x.padStart(4, "0"));
+  return all.length === 8 ? all : undefined;
+}

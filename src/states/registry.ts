@@ -10,14 +10,41 @@ export interface NormalizedEntity {
   jurisdiction?: string;
   principal_address?: string;
   mailing_address?: string;
-  registered_agent?: { name?: string; address?: string };
+  registered_agent?: AgentInfo;
+  /** NY: the person/company designated by the DOS to receive service of process. */
+  service_of_process?: AgentInfo;
+  /** Set when personal data was removed because of an erasure/suppression request. */
+  redacted?: string;
   county?: string;
   naics?: string;
   details_url?: string;
   source_url: string;
 }
 
+export interface AgentInfo {
+  name?: string;
+  address?: string;
+  /** "organization" (commercial agent / company) or "individual" (a natural person). */
+  kind?: "organization" | "individual";
+  /** True when an individual's name/address was withheld (pass include_agent_details=true to see it). */
+  withheld?: boolean;
+}
+
 type Row = Record<string, unknown>;
+
+/** Heuristic: does this look like an organization rather than a natural person? */
+const ORG_RE =
+  /\b(INC|INCORPORATED|LLC|L\.L\.C|LLP|LP|L\.P|LTD|LIMITED|CORP|CORPORATION|CO|COMPANY|PC|P\.C|PLLC|PA|TRUST|BANK|ASSOCIATION|ASSN|GROUP|PARTNERS|PARTNERSHIP|HOLDINGS|SERVICES?|AGENTS?|AGENCY|SYSTEMS?|SOLUTIONS|FUND|FOUNDATION|SOCIETY|UNIVERSITY|COLLEGE|CHURCH|COUNCIL|LAW|ATTORNEYS|ASSOCIATES|REGISTERED|ENTERPRISES?|INTERNATIONAL|CSC|CT|NRAI|COGENCY|INCORP|CAPITOL|NORTHWEST)\b/i;
+
+export function looksLikeOrganization(name: string | undefined): boolean {
+  return !!name && ORG_RE.test(name.replace(/[,.]/g, (m) => (m === "." ? "." : " ")));
+}
+
+/** Build an AgentInfo, classifying it when the source does not say. */
+export function agent(name: string | undefined, address: string | undefined, kind?: "organization" | "individual"): AgentInfo | undefined {
+  if (!name && !address) return undefined;
+  return compact({ name, address, kind: kind ?? (looksLikeOrganization(name) ? "organization" : "individual") }) as AgentInfo;
+}
 
 export interface StateSource {
   code: string;
@@ -121,13 +148,11 @@ const NY: StateSource = {
         jurisdiction: s(r.jurisdiction),
         county: s(r.county),
         principal_address: joinAddr(r.location_name, r.location_address_1, r.location_address_2, r.location_city, r.location_state, r.location_zip),
-        mailing_address: joinAddr(r.dos_process_name, r.dos_process_address_1, r.dos_process_address_2, r.dos_process_city, r.dos_process_state, r.dos_process_zip)
-          ? `Service of process: ${joinAddr(r.dos_process_name, r.dos_process_address_1, r.dos_process_address_2, r.dos_process_city, r.dos_process_state, r.dos_process_zip)}`
-          : undefined,
-        registered_agent: {
-          name: s(r.registered_agent_name),
-          address: joinAddr(r.registered_agent_address_1, r.registered_agent_address_2, r.registered_agent_city, r.registered_agent_state, r.registered_agent_zip),
-        },
+        service_of_process: agent(s(r.dos_process_name), joinAddr(r.dos_process_address_1, r.dos_process_address_2, r.dos_process_city, r.dos_process_state, r.dos_process_zip)),
+        registered_agent: agent(
+          s(r.registered_agent_name),
+          joinAddr(r.registered_agent_address_1, r.registered_agent_address_2, r.registered_agent_city, r.registered_agent_state, r.registered_agent_zip),
+        ),
         details_url: "https://apps.dos.ny.gov/publicInquiry/",
         source_url: src(s(r.dos_id)!),
       }),
@@ -154,7 +179,8 @@ const CO: StateSource = {
   activeWhere: "entitystatus in ('Good Standing','Exists','Delinquent','Noncompliant','Registered Agent Resigned')",
   normalize: (rows, src) =>
     rows.map((r) => {
-      const agentName = s(r.agentorganizationname) ?? s([r.agentfirstname, r.agentmiddlename, r.agentlastname, r.agentsuffix].map(s).filter(Boolean).join(" "));
+      const agentOrg = s(r.agentorganizationname);
+      const agentName = agentOrg ?? s([r.agentfirstname, r.agentmiddlename, r.agentlastname, r.agentsuffix].map(s).filter(Boolean).join(" "));
       return compact({
         state: "CO",
         entity_id: s(r.entityid)!,
@@ -165,10 +191,11 @@ const CO: StateSource = {
         jurisdiction: s(r.jurisdictonofformation),
         principal_address: joinAddr(r.principaladdress1, r.principaladdress2, r.principalcity, r.principalstate, r.principalzipcode, r.principalcountry),
         mailing_address: joinAddr(r.mailingaddress1, r.mailingaddress2, r.mailingcity, r.mailingstate, r.mailingzipcode, r.mailingcountry),
-        registered_agent: {
-          name: agentName,
-          address: joinAddr(r.agentprincipaladdress1, r.agentprincipaladdress2, r.agentprincipalcity, r.agentprincipalstate, r.agentprincipalzipcode),
-        },
+        registered_agent: agent(
+          agentName,
+          joinAddr(r.agentprincipaladdress1, r.agentprincipaladdress2, r.agentprincipalcity, r.agentprincipalstate, r.agentprincipalzipcode),
+          agentOrg ? "organization" : agentName ? "individual" : undefined,
+        ),
         details_url: `https://www.coloradosos.gov/biz/BusinessEntityDetail.do?masterFileId=${s(r.entityid)}`,
         source_url: src(s(r.entityid)!),
       });
@@ -206,7 +233,9 @@ const OR: StateSource = {
       const pp = of("PRINCIPAL PLACE OF BUSINESS");
       const ma = of("MAILING ADDRESS");
       const ra = of("REGISTERED AGENT");
-      const raName = ra ? s(ra.entity_of_record_name) ?? s([ra.first_name, ra.middle_name, ra.last_name, ra.suffix].map(s).filter(Boolean).join(" ")) : undefined;
+      const raOrg = ra ? s(ra.entity_of_record_name) : undefined;
+      const raPerson = ra ? s([ra.first_name, ra.middle_name, ra.last_name, ra.suffix].map(s).filter(Boolean).join(" ")) : undefined;
+      const raName = raOrg ?? raPerson;
       const det = first.business_details as { url?: string } | undefined;
       return compact({
         state: "OR",
@@ -218,7 +247,9 @@ const OR: StateSource = {
         jurisdiction: s(first.jurisdiction),
         principal_address: pp ? joinAddr(pp.address, pp.address_continued, pp.city, pp.state, pp.zip) : undefined,
         mailing_address: ma ? joinAddr(ma.address, ma.address_continued, ma.city, ma.state, ma.zip) : undefined,
-        registered_agent: ra ? { name: raName, address: joinAddr(ra.address, ra.address_continued, ra.city, ra.state, ra.zip) } : undefined,
+        registered_agent: ra
+          ? agent(raName, joinAddr(ra.address, ra.address_continued, ra.city, ra.state, ra.zip), raPerson && !raOrg ? "individual" : raOrg ? (looksLikeOrganization(raOrg) ? "organization" : undefined) : undefined)
+          : undefined,
         details_url: det?.url?.replace(/^http:/, "https:"),
         source_url: src(id),
       });
