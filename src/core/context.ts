@@ -5,6 +5,10 @@ import type { Principal } from "./quota.js";
 export interface CallContext {
   principal?: Principal;
   transport: "stdio" | "http";
+  /** Upstream HTTP requests actually made during this call (cache hits make none). */
+  upstream?: number;
+  /** Quota reservation made before the call, settled (refunded) after it. */
+  reservation?: unknown;
 }
 const als = new AsyncLocalStorage<CallContext>();
 export function runWithContext<T>(ctx: CallContext, fn: () => Promise<T>): Promise<T> {
@@ -13,8 +17,11 @@ export function runWithContext<T>(ctx: CallContext, fn: () => Promise<T>): Promi
 export function currentContext(): CallContext | undefined {
   return als.getStore();
 }
-/** Keyed callers, and local (stdio) use, may unlock opt-in data such as individual agent details. */
+/**
+ * Keyed callers whose key was confirmed in Redis, and local (stdio) use, may unlock opt-in data such
+ * as individual agent details. Keys accepted unverified (degraded mode) count as anonymous here.
+ */
 export function callerIsTrusted(): boolean {
   const c = als.getStore();
-  return !c || c.transport === "stdio" || c.principal?.tier === "key";
+  return !c || c.transport === "stdio" || (c.principal?.tier === "key" && !c.principal.unverified);
 }

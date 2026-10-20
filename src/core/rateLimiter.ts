@@ -79,7 +79,7 @@ class Spacer {
  * 2. Fleet-wide token buckets shared by all instances (anonymous callers: shared bucket only;
  *    keyed callers: reserved bucket first, then shared). If no token arrives within maxWaitMs the
  *    call fails with RATE_LIMITED (fail closed). If Redis itself fails, the limiter switches to
- *    degraded mode: a conservative local rate (default 1 rps per instance) instead of an outage.
+ *    degraded mode: a conservative local rate (degradedRps per instance; 0 = refuse) instead of an outage.
  */
 export class RateLimiter {
   private readonly local: Spacer;
@@ -94,7 +94,7 @@ export class RateLimiter {
     this.o = { name: opts.name ?? "upstream", maxWaitMs: opts.maxWaitMs ?? 5000, maxAttempts: opts.maxAttempts ?? 6, maxQueueMs: opts.maxQueueMs ?? 15_000, degradedRps: opts.degradedRps ?? 1 };
     this.buckets = buckets && "take" in buckets ? { shared: buckets } : (buckets ?? {});
     this.local = new Spacer(1000 / rps, this.o.maxQueueMs);
-    this.degraded = new Spacer(1000 / this.o.degradedRps, this.o.maxQueueMs);
+    this.degraded = new Spacer(this.o.degradedRps > 0 ? 1000 / this.o.degradedRps : Infinity, this.o.maxQueueMs);
   }
 
   private busy(why: string, retryAfterSeconds = 2): ToolError {
@@ -123,6 +123,11 @@ export class RateLimiter {
   }
 
   private async acquireDegraded(): Promise<void> {
+    if (!(this.o.degradedRps > 0))
+      throw new ToolError("RATE_LIMITED", `Upstream ${this.o.name} requests are paused while the server's shared rate-limit store is unavailable.`, "Retry in a few minutes.", {
+        retry_after_seconds: 120,
+        scope: "degraded",
+      });
     const q = await this.degraded.wait();
     if (q !== null) throw this.busy("limited while the shared rate-limit store is unavailable", Math.ceil(q / 1000));
   }

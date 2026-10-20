@@ -92,6 +92,8 @@ describe("C1: cost-weighted quotas", () => {
   });
   it("exhausts the per-minute and per-day budgets with retry-after and a key hint", async () => {
     let now = Date.UTC(2026, 9, 20, 12, 0, 10);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(now);
     const store = new MemoryQuotaStore(() => now);
     cfg({ QUOTA_ANON_PER_MINUTE: "10", QUOTA_ANON_PER_DAY: "15" });
     const p = ipPrincipal("203.0.113.9");
@@ -103,12 +105,14 @@ describe("C1: cost-weighted quotas", () => {
     expect(e!.details).toMatchObject({ scope: "minute", limit: 10, retry_after_seconds: 50 });
     expect(e!.hint).toMatch(/free API key/);
     now += 60_000; // next minute: daily budget (15) still applies
+    vi.setSystemTime(now);
     await chargeQuota(p, "lookup_business_entity", {}, store); // 15
     const d = await chargeQuota(p, "search_company", {}, store).catch((x) => x as ToolError);
     expect(d!.details).toMatchObject({ scope: "day", limit: 15 });
     // API keys get their own, higher budget
     const k: Principal = { id: "key:abc", tier: "key" };
     await expect(chargeQuota(k, "search_company", {}, store)).resolves.toBeUndefined();
+    vi.useRealTimers();
   });
   it("fails closed when the quota backend errors", async () => {
     const broken: QuotaStore = { consume: async () => { throw new Error("redis down"); } };
@@ -133,6 +137,7 @@ describe("C1: cost-weighted quotas", () => {
     expect(ipPrincipal("2001:db8:1:2:aaaa::1").id).toBe(ipPrincipal("2001:db8:1:2:bbbb::9").id);
     expect(ipPrincipal("2001:db8:1:3::1").id).not.toBe(ipPrincipal("2001:db8:1:2::1").id);
     expect(ipPrincipal("203.0.113.9").id).not.toContain("203");
+    cfg({ API_KEY_SECRET: "k".repeat(40) });
     expect(generateApiKey().key).toMatch(KEY_RE);
   });
 });

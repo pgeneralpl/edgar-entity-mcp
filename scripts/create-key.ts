@@ -1,14 +1,14 @@
 /**
  * Mint a free API key for the hosted endpoint. The key is printed once and cannot be recovered.
  *
- *   UPSTASH_REDIS_REST_URL=... UPSTASH_REDIS_REST_TOKEN=... IP_HASH_SALT=... [API_KEY_SECRET=...] \
+ *   UPSTASH_REDIS_REST_URL=... UPSTASH_REDIS_REST_TOKEN=... IP_HASH_SALT=... API_KEY_SECRET=... \
  *     npx tsx scripts/create-key.ts [--per-day N] [--per-minute N]
  *
  * Keys are self-verifying: eem_<id>_<HMAC(API_KEY_SECRET, id)>. Redis stores only
  * `apikey:<id>` = { created, per_day?, per_minute? } — no name, email or contact. Record the id
  * (not the key) in the request issue if you need to find it later. Delete with scripts/delete-key.ts.
- * The script must run with the same API_KEY_SECRET (or IP_HASH_SALT, if API_KEY_SECRET is unset) as
- * the deployment, or the minted keys will not verify there.
+ * The script must run with the same API_KEY_SECRET as the deployment (required, >= 32 chars), or the
+ * minted keys will not verify there.
  */
 import { Redis } from "@upstash/redis";
 import { config } from "../src/config.js";

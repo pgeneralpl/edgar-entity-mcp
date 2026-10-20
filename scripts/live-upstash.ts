@@ -12,11 +12,14 @@ const run = randomBytes(4).toString("hex");
 process.env.CACHE_PREFIX = `eem:livetest-${run}:`;
 process.env.QUOTA_ANON_PER_MINUTE = "5";
 process.env.QUOTA_ANON_PER_DAY = "1000";
-process.env.QUOTA_ANON_NETWORK_PER_DAY = "12";
+process.env.QUOTA_ANON_GLOBAL_PER_DAY = "20"; // => /24 cap 2 (10%)
+process.env.QUOTA_ANON_GLOBAL_HARD_PER_DAY = "23";
+process.env.QUOTA_ANON_TRICKLE_PER_DAY = "1";
 process.env.QUOTA_KEY_PER_MINUTE = "50";
 process.env.QUOTA_KEY_PER_DAY = "8";
-process.env.QUOTA_ANON_GLOBAL_PER_DAY = "16";
-if (!process.env.IP_HASH_SALT) process.env.IP_HASH_SALT = randomBytes(24).toString("hex"); // throwaway, ≥32 chars
+// Throwaway secrets (>= 32 chars) for this run only.
+process.env.IP_HASH_SALT = randomBytes(24).toString("hex");
+process.env.API_KEY_SECRET = randomBytes(24).toString("hex");
 
 const { config } = await import("../src/config.js");
 const { createHttpHandler } = await import("../src/http/handler.js");
@@ -30,6 +33,7 @@ const { check, failed } = await import("./lib.js");
 const c = config();
 if (!c.upstashUrl) throw new Error("Upstash env not loaded");
 const host = new URL(c.upstashUrl).host;
+/** Billed commands we can see from the client: REST commands (pipelines counted per command). Script-internal commands are added from the script's known shape below. */
 let redisRequests = 0;
 const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -53,44 +57,41 @@ async function tool(name: string, args: object, extra: Record<string, string>) {
   return { status: res.status, text: t, limited: t.includes("RATE_LIMITED") };
 }
 const ipA = { "x-real-ip": `198.51.100.${(parseInt(run, 16) % 200) + 1}` };
-const ipB = { "x-real-ip": `203.0.113.${(parseInt(run, 16) % 200) + 1}` };
 
 try {
   console.log(`prefix ${c.cachePrefix}`);
   // Warm the in-memory ticker cache so per-call Redis counts reflect quota + cache traffic only.
   await tool("search_company", { query: "AAPL", limit: 1 }, { "x-real-ip": "192.0.2.1" });
 
-  console.log("Anonymous per-IP minute quota (5 units/min)");
+  const q = (ip: string) => tool("search_company", { query: "AAPL", limit: 1 }, { "x-real-ip": ip });
+  const net = (n: number, h = 1) => `100.${64 + Math.floor(n / 250)}.${n % 250}.${h}`; // distinct /24s (CGNAT range)
+
+  console.log("Per-/24 cap (10% of the global budget = 2 units), memoised remaining");
   let before = redisRequests;
-  const r: boolean[] = [];
-  for (let i = 0; i < 5; i++) r.push((await tool("search_company", { query: "AAPL", limit: 1 }, ipA)).limited);
-  const perAllowed = (redisRequests - before) / 5;
-  check(r.every((x) => !x), "5 x 1-unit calls allowed");
+  const a1 = await q(net(1, 1));
+  const a2 = await q(net(1, 2));
+  const perAllowed = (redisRequests - before) / 2;
   before = redisRequests;
-  const sixth = await tool("search_company", { query: "AAPL", limit: 1 }, ipA);
+  const a3 = await q(net(1, 3));
   const perBlocked = redisRequests - before;
-  check(sixth.limited && /retry_after_seconds/.test(sixth.text), "6th call RATE_LIMITED with retry_after_seconds");
   before = redisRequests;
-  const seventh = await tool("search_company", { query: "AAPL", limit: 1 }, ipA);
-  check(seventh.limited, `7th call still limited`);
-  const perRepeatBlocked0 = redisRequests - before;
-  check(!(await tool("search_company", { query: "AAPL", limit: 1 }, ipB)).limited, "other IP unaffected");
-  const perRepeatBlocked = perRepeatBlocked0;
-  console.log(`  Upstash commands: ${perAllowed.toFixed(1)} per allowed call (warm cache), ${perBlocked} first blocked, ${perRepeatBlocked} repeat blocked`);
-  check(perAllowed <= 1.01 && perRepeatBlocked === 0, "allowed = 1 command (single EVALSHA), repeat blocked = 0");
+  const a4 = await q(net(1, 4));
+  const perRepeat = redisRequests - before;
+  check(!a1.limited && !a2.limited && a3.limited && a3.text.includes("network") && a4.limited, "2 units per /24, then refused (scope network)");
+  check(perAllowed === 1 && perBlocked === 0 && perRepeat === 0, `REST commands: ${perAllowed} per allowed call (EVALSHA), ${perBlocked} for the first refused call (remaining known locally), ${perRepeat} repeat`);
 
-  console.log("Network /24 daily cap (12 units) against IP rotation");
-  const base = `198.51.100.`;
-  const rot: boolean[] = [];
-  for (let i = 0; i < 8; i++) rot.push((await tool("search_company", { query: "AAPL", limit: 1 }, { "x-real-ip": `${base}${210 + i}` })).limited);
-  check(rot.slice(0, 7).every((x) => !x) && rot[7], `5 + 7 units from rotating IPs allowed, then refused (${rot.map((x) => (x ? "L" : ".")).join("")})`);
-
-  console.log("Global anonymous daily cap (16 units across all IPs)");
-  const g: boolean[] = [];
-  for (let i = 0; i < 3; i++) g.push((await tool("search_company", { query: "AAPL", limit: 1 }, { "x-real-ip": `192.0.2.${50 + i}` })).limited);
+  console.log("Soft global cap (20) with 1-unit trickle per IP, hard ceiling 23");
+  for (let n = 2; n <= 9; n++) for (let h = 1; h <= 2; h++) await q(net(n, h)); // 1 warm + 2 + 16 = 19
+  const s1 = await q(net(10, 1)); // 20 = soft cap
+  const t1 = await q(net(11, 1)); // past soft cap: trickle (own counter 1 <= 1)
+  const t1b = await q(net(11, 1)); // own counter would be 2 > trickle
+  const t2 = await q(net(12, 1));
+  const t3 = await q(net(13, 1)); // 23 = hard
   before = redisRequests;
-  const g2 = await tool("search_company", { query: "AAPL", limit: 1 }, { "x-real-ip": "192.0.2.99" });
-  check(g[0] === false && g[1] === false && g[2] === true && g2.limited && g2.text.includes("global"), `refused once the anonymous total is spent (${g.map((x) => (x ? "L" : ".")).join("")}), ${redisRequests - before} commands for a new IP after that`);
+  const t4 = await q(net(14, 1));
+  const afterHard = redisRequests - before;
+  check(!s1.limited && !t1.limited && t1b.limited && t1b.text.includes("global") && !t2.limited && !t3.limited && t4.limited, "soft cap → 1-unit trickle per IP → hard ceiling");
+  check(afterHard === 0, `new IP after the hard ceiling: ${afterHard} REST commands`);
 
   console.log("Self-verifying API key (per-day 8 units)");
   const { key, id: keyId } = generateApiKey();
@@ -99,8 +100,10 @@ try {
   check(stored && !String(stored).includes(key) && !/name|contact/.test(String(stored)), "record holds no key, name or contact");
   const k = { authorization: `Bearer ${key}` };
   const rk: boolean[] = [];
+  before = redisRequests;
   for (let i = 0; i < 8; i++) rk.push((await tool("search_company", { query: "AAPL", limit: 1 }, { ...k, ...ipA })).limited);
-  check(rk.every((x) => !x), "key: 8 calls allowed even though the IP is over its anonymous quota");
+  check(rk.every((x) => !x), "key: 8 calls allowed even though anonymous budgets are spent");
+  check(redisRequests - before === 1 + 8, `key: 1 GET (lookup, then memoised) + 1 EVALSHA per call (${redisRequests - before} REST commands for 8 calls)`);
   const over = await tool("search_company", { query: "AAPL", limit: 1 }, { ...k, ...ipA });
   check(over.limited && over.text.includes("day"), "key: 9th call RATE_LIMITED (daily)");
   console.log("Stored state: only integer counters under hashed ids, TTL = window");
@@ -115,14 +118,14 @@ try {
   check(!all.some((k) => k.includes(":u:")), "no usage hashes");
   check(quotaKeys.every((k) => /:q:[dm]:((ip|net|key):[0-9a-zA-Z]+|anon):\d+$/.test(k)), `${quotaKeys.length} quota keys, all hashed id / key id / anon total + window`);
   const values = await Promise.all(quotaKeys.map((k) => redis.get<string>(k)));
-  check(values.every((v) => /^\d+$/.test(String(v))), "all quota values are integers");
+  check(values.every((v) => /^-?\d+$/.test(String(v))), "all quota values are integers");
   const ttlOf = await Promise.all(quotaKeys.map(async (k) => [k, await redis.ttl(k)] as const));
   const dayT = ttlOf.filter(([k]) => k.includes(":q:d:")).map(([, t]) => t);
   const minT = ttlOf.filter(([k]) => k.includes(":q:m:")).map(([, t]) => t);
   check(dayT.length > 0 && dayT.every((t) => t > 0 && t <= 25 * 3600), `daily counters TTL <= 25 h (max ${Math.max(...dayT)} s)`);
-  check(minT.every((t) => t > 0 && t <= 70), `minute counters TTL <= 70 s (max ${Math.max(0, ...minT)} s)`);
+  check(minT.length === 0, "no per-minute counters in Redis (minute limits are in memory)");
   const dump = JSON.stringify(all) + JSON.stringify(values) + JSON.stringify(await Promise.all(all.filter((k) => !k.includes(":q:")).map((k) => redis.get<string>(k))));
-  const rawIps = [ipA["x-real-ip"], ipB["x-real-ip"], "198.51.100.", "203.0.113.", "192.0.2.1"];
+  const rawIps = [ipA["x-real-ip"], "198.51.100.", "100.64.", "192.0.2.1"];
   check(!rawIps.some((ip) => dump.includes(ip)), "no raw IP anywhere in keys or values");
   const other = all.filter((k) => !k.includes(":q:") && !k.includes(":apikey:"));
   check(other.every((k) => /:c:[0-9a-f]{40}$/.test(k)), `${other.length} cache keys, all hashed (no URLs or tool arguments in key names)`);
@@ -132,7 +135,10 @@ try {
   const bad = await tool("search_company", { query: "AAPL" }, { authorization: `Bearer eem_AAAAAAAAAAAA_${"0".repeat(24)}` });
   check(bad.status === 401 && redisRequests === before, `forged key -> 401 with 0 Redis commands (${bad.status}, ${redisRequests - before})`);
   const del = await deleteApiKey(redis, key);
-  check(del.record && del.counters >= 1, `delete-key removed the record and ${del.counters} counters`);
+  check(del.record && del.counters >= 1, `delete-key removed the record and ${del.counters} counter(s)`);
+  const { verifyApiKey } = await import("../src/core/apiKeys.js");
+  clearApiKeyMemo();
+  check((await verifyApiKey(key)) === null, "deleted key no longer verifies");
   check(!(await redis.get(`${c.cachePrefix}apikey:${keyId}`)), "nothing left for the key");
   clearApiKeyMemo();
   const revoked = await tool("search_company", { query: "AAPL" }, k);
@@ -148,11 +154,11 @@ try {
   console.log("Degraded mode (Redis rejects requests)");
   const broken = new Redis({ url: c.upstashUrl, token: "invalid-token", automaticDeserialization: false });
   const lim2 = new RateLimiter(50, upstashTokenBucket(broken, 2, `livetest-${run}-b`), { name: "livetest", degradedRps: 1 });
-  const t1 = Date.now();
-  await lim2.acquire();
-  await lim2.acquire();
-  await lim2.acquire();
-  check(redisDegraded() && Date.now() - t1 >= 1800, `limiter falls back to 1 rps locally instead of failing (${Date.now() - t1} ms for 3)`);
+  const d0 = Date.now();
+  await lim2.acquire("key");
+  await lim2.acquire("key");
+  await lim2.acquire("key");
+  check(redisDegraded() && Date.now() - d0 >= 1800, `keyed limiter falls back to the degraded local rate instead of failing (${Date.now() - d0} ms for 3 at 1 rps)`);
   clearRedisDegraded();
   const qs = new UpstashQuotaStore(broken);
   const ok = await chargeQuota({ id: "ip:livetestdegraded", tier: "anon", network: "net:livetestdegraded" }, "search_company", {}, qs).then(() => true, () => false);

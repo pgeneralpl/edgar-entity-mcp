@@ -5,7 +5,7 @@ import { ALL_TOOLS, type ToolDef } from "./tools.js";
 import { ToolError, toToolError } from "./core/errors.js";
 import type { Principal } from "./core/quota.js";
 import { getUsageHooks } from "./core/usage.js";
-import { runWithContext } from "./core/context.js";
+import { runWithContext, type CallContext } from "./core/context.js";
 import { PACKAGE_NAME, VERSION } from "./version.js";
 import { config } from "./config.js";
 import { DATA_SOURCES_MD } from "./dataSources.js";
@@ -26,32 +26,37 @@ export async function runTool(def: ToolDef, args: unknown, transport: Transport,
   const principal = (auth?.extra as { principal?: Principal } | undefined)?.principal;
   const ev = { tool: def.name, transport, apiKey: principal?.tier === "key" ? auth?.token : undefined, clientId: auth?.clientId, principal, args };
   const t0 = Date.now();
-  let text: string;
+  let text = "";
   let ok = true;
   let errorCode: string | undefined;
-  try {
-    if (hooks.beforeCall) {
+  // One context for the whole call: quota reservation (beforeCall), upstream request count (run),
+  // settlement (afterCall).
+  const cctx: CallContext = { principal, transport, upstream: 0 };
+  await runWithContext(cctx, async () => {
+    try {
+      if (hooks.beforeCall) {
+        try {
+          await hooks.beforeCall(ev);
+        } catch (e) {
+          throw e instanceof ToolError ? e : new ToolError("UNAUTHORIZED", "Call rejected by the server's access policy.");
+        }
+      }
+      const result = await def.run(args as never);
+      text = JSON.stringify(result);
+    } catch (e) {
+      const te = toToolError(e);
+      ok = false;
+      errorCode = te.code;
+      text = JSON.stringify({ error: { code: te.code, message: te.message, hint: te.hint, ...(te.details ?? {}) } });
+    }
+    if (hooks.afterCall) {
       try {
-        await hooks.beforeCall(ev);
-      } catch (e) {
-        throw e instanceof ToolError ? e : new ToolError("UNAUTHORIZED", "Call rejected by the server's access policy.");
+        await hooks.afterCall({ ...ev, ok, ms: Date.now() - t0, errorCode, responseChars: text.length });
+      } catch {
+        /* never fail a call because of metering */
       }
     }
-    const result = await runWithContext({ principal, transport }, () => def.run(args as never));
-    text = JSON.stringify(result);
-  } catch (e) {
-    const te = toToolError(e);
-    ok = false;
-    errorCode = te.code;
-    text = JSON.stringify({ error: { code: te.code, message: te.message, hint: te.hint, ...(te.details ?? {}) } });
-  }
-  if (hooks.afterCall) {
-    try {
-      await hooks.afterCall({ ...ev, ok, ms: Date.now() - t0, errorCode, responseChars: text.length });
-    } catch {
-      /* never fail a call because of metering */
-    }
-  }
+  });
   return { content: [{ type: "text", text }], ...(ok ? {} : { isError: true }) };
 }
 

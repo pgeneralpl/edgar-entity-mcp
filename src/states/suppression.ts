@@ -89,6 +89,17 @@ function containsName(hay: string | undefined, names: Set<string>): boolean {
   return false;
 }
 
+/** Substring match ignoring spaces, for names of at least 6 letters (avoids short-name false positives). */
+function containsSquashed(hay: string | undefined, names: Set<string>): boolean {
+  if (!hay || !names.size) return false;
+  const h = normName(hay).replace(/ /g, "");
+  for (const n of names) {
+    const sq = n.replace(/ /g, "");
+    if (sq.length >= 6 && h.includes(sq)) return true;
+  }
+  return false;
+}
+
 /**
  * Apply privacy rules to normalized entities:
  * - suppressed entities (by normalized id), and entities whose name, NY location name or any
@@ -108,10 +119,13 @@ export function applyPrivacy(entities: NormalizedEntity[], o: { includeAgentDeta
     return a;
   };
   return entities.map((e) => {
-    const personalHit = [e.name, e.location_name, e.principal_address, e.mailing_address].some((f) => containsName(f, names));
+    // Entity / location names are also matched without word boundaries ("JANEDOE HOLDINGS LLC").
+    const nameHit = [e.name, e.location_name].some((f) => containsName(f, names) || containsSquashed(f, names));
+    const personalHit = nameHit || [e.principal_address, e.mailing_address].some((f) => containsName(f, names));
     if (o.suppression.entities.has(normEntityId(e.state, e.entity_id)) || personalHit) {
       const { registered_agent: _a, service_of_process: _s, principal_address: _p, mailing_address: _m, location_name: _l, ...rest } = e;
-      return { ...rest, redacted: "Personal data removed following a data-subject request." };
+      // A suppressed person's name inside the entity name is withheld too.
+      return { ...rest, ...(nameHit ? { name: "[withheld]" } : {}), redacted: "Personal data removed following a data-subject request." };
     }
     const out = { ...e };
     if (e.registered_agent) out.registered_agent = fix(e.registered_agent);

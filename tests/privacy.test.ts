@@ -21,7 +21,7 @@ const UA_STR = "SecretAgentUA/9.9";
 
 let stderr: string[] = [];
 beforeEach(() => {
-  resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", IP_HASH_SALT: "test-secret-0123456789abcdefghijklmnop", UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" }));
+  resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", IP_HASH_SALT: "test-secret-0123456789abcdefghijklmnop", API_KEY_SECRET: "k".repeat(40), UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" }));
   clearSaltMemo();
   stderr = [];
   vi.spyOn(process.stderr, "write").mockImplementation((s: string | Uint8Array) => {
@@ -68,11 +68,12 @@ describe("Redis rate-limit state contains no raw IPs, user agents, paths or tool
     const keys = [...f.kv.keys()];
     expect(keys.some((k) => /^eem:v1:q:d:ip:[0-9a-f]{20}:\d{8}$/.test(k))).toBe(true); // per-IP daily
     expect(keys.some((k) => /^eem:v1:q:d:net:[0-9a-f]{20}:\d{8}$/.test(k))).toBe(true); // per-/24 daily
-    expect(keys.some((k) => /^eem:v1:q:m:ip:[0-9a-f]{20}:\d+$/.test(k))).toBe(true); // per-minute
+    expect(keys.some((k) => /^eem:v1:q:d:anon:\d{8}$/.test(k))).toBe(true); // global anonymous daily
+    expect(keys.some((k) => k.includes(":q:m:"))).toBe(false); // per-minute limits are in memory only
     // Every key is a hashed id, a cache hash, or a counter; every quota value is an integer.
     for (const k of keys) expect(k).toMatch(/^eem:v1:(q:[dm]:((ip|net|key):[0-9a-f]+|anon):\d+|c:[0-9a-f]{40})$/);
     for (const [k, { v, ttl }] of f.kv) {
-      if (k.includes(":q:")) expect(v).toMatch(/^\d+$/);
+      if (k.includes(":q:")) expect(v).toMatch(/^-?\d+$/);
       if (k.includes(":q:d:")) expect(ttl).toBe(DAY_COUNTER_TTL_SECONDS);
       if (k.includes(":q:m:")) expect(ttl).toBe(MINUTE_COUNTER_TTL_SECONDS);
     }
@@ -109,7 +110,12 @@ describe("daily-rotating IP hash salt", () => {
     expect(loadConfig(redis).startupProblem).toMatch(/IP_HASH_SALT/);
     expect(loadConfig({ ...redis, IP_HASH_SALT: "edgar-entity-mcp" }).startupProblem).toMatch(/IP_HASH_SALT/);
     expect(loadConfig({ ...redis, IP_HASH_SALT: "short-secret" }).startupProblem).toMatch(/32/);
-    expect(loadConfig({ ...redis, IP_HASH_SALT: "x".repeat(32) }).startupProblem).toBeUndefined();
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "x".repeat(32) }).startupProblem).toMatch(/API_KEY_SECRET/); // M3: required too
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "x".repeat(32), API_KEY_SECRET: "short" }).startupProblem).toMatch(/API_KEY_SECRET/);
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "x".repeat(32), API_KEY_SECRET: "x".repeat(32) }).startupProblem).toMatch(/differ/);
+    expect(loadConfig({ ...redis, IP_HASH_SALT: "x".repeat(32), API_KEY_SECRET: "y".repeat(32) }).startupProblem).toBeUndefined();
+    // No derivation from IP_HASH_SALT: without API_KEY_SECRET minted keys are disabled.
+    expect(loadConfig({ IP_HASH_SALT: "x".repeat(32) }).apiKeySecret).toBeUndefined();
     expect(loadConfig({}).startupProblem).toBeUndefined(); // no Redis: nothing persisted
     resetConfig(loadConfig({ ...redis, SEC_USER_AGENT: "T t@example.org" }));
     const res = await createHttpHandler()(new Request("https://x/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }));

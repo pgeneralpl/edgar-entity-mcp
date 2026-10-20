@@ -16,8 +16,9 @@ const ID_RE = /^[A-Za-z0-9]{12}$/;
 
 export const sha256 = (s: string) => createHash("sha256").update(s).digest("hex");
 
-function keyMac(id: string): string {
-  return createHmac("sha256", config().apiKeySecret).update(id).digest("hex").slice(0, 24);
+function keyMac(id: string): string | null {
+  const secret = config().apiKeySecret;
+  return secret ? createHmac("sha256", secret).update(id).digest("hex").slice(0, 24) : null;
 }
 
 function randomId(len = 12): string {
@@ -29,15 +30,19 @@ function randomId(len = 12): string {
 
 export function generateApiKey(): { key: string; id: string } {
   const id = randomId();
-  return { key: `eem_${id}_${keyMac(id)}`, id };
+  const mac = keyMac(id);
+  if (!mac) throw new Error("API_KEY_SECRET (>= 32 chars) must be set to mint keys.");
+  return { key: `eem_${id}_${mac}`, id };
 }
 
 /** Parse and verify the MAC. Returns the key id, or null for anything forged or malformed. */
 export function parseApiKey(key: string): string | null {
   const m = KEY_RE.exec(key);
   if (!m) return null;
+  const mac = keyMac(m[1]!);
+  if (!mac) return null; // minted keys disabled without API_KEY_SECRET
   const a = Buffer.from(m[2]!, "hex");
-  const b = Buffer.from(keyMac(m[1]!), "hex");
+  const b = Buffer.from(mac, "hex");
   return a.length === b.length && timingSafeEqual(a, b) ? m[1]! : null;
 }
 
@@ -104,9 +109,13 @@ function envKeyMatch(key: string): boolean {
  *   because a deleted key could otherwise only be used until Redis recovers.
  */
 export async function verifyApiKey(key: string): Promise<Principal | null> {
-  if (envKeyMatch(key)) return { id: `key:env${sha256(key).slice(0, 12)}`, tier: "key" };
+  const revoked = config().revokedKeyIds;
+  if (envKeyMatch(key)) {
+    const envId = `env${sha256(key).slice(0, 12)}`;
+    return revoked.has(envId) ? null : { id: `key:${envId}`, tier: "key" };
+  }
   const id = parseApiKey(key);
-  if (!id) return null;
+  if (!id || revoked.has(id)) return null; // REVOKED_KEY_IDS: immediate, works without Redis
   const hit = memo.get(id);
   if (hit !== undefined) return hit || null;
   const redis = getRedis();

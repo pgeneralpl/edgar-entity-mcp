@@ -14,7 +14,7 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
   return {
     // "misconfigured": Redis is on but the hashing secret is missing/weak; every request gets 503.
     status: c.startupProblem ? "misconfigured" : degraded.degraded ? "degraded" : "ok",
-    ...(degraded.degraded ? { degraded: { reason: degraded.reason, since: degraded.since, mode: "local in-memory limits, SEC at the degraded rate" } } : {}),
+    ...(degraded.degraded ? { degraded: { reason: degraded.reason, since: degraded.since, mode: "local in-memory limits; anonymous callers cache-only; API-key callers at the degraded SEC rate" } } : {}),
     name: PACKAGE_NAME,
     version: VERSION,
     mcp_endpoint: "/mcp",
@@ -27,10 +27,12 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
       scope: redis && env.SEC_DISTRIBUTED_RATE_LIMIT !== "0" && env.DISTRIBUTED_RATE_LIMIT !== "0" ? "fleet (redis)" : "instance",
     },
     quotas: {
-      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay, units_per_day_per_network: c.quota.anonNetworkPerDay, units_per_day_all_anonymous: c.quota.anonGlobalPerDay },
+      anonymous: { units_per_minute: c.quota.anonPerMinute, units_per_day: c.quota.anonPerDay, units_per_day_per_network: c.quota.anonNetworkPerDay,
+        units_per_day_all_anonymous: { soft: c.quota.anonGlobalPerDay, hard: c.quota.anonGlobalHardPerDay, per_ip_after_soft_cap: c.quota.anonTricklePerDay },
+        charging: "estimate reserved, unused part refunded after the call (minimum 1 unit)" },
       api_key: { units_per_minute: c.quota.keyPerMinute, units_per_day: c.quota.keyPerDay },
       // What rate limiting stores: integer counters under daily-rotating hashed ids, TTL = window.
-      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, day_counter_ttl_hours: 25, minute_counter_ttl_seconds: 70 },
+      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, api_key_secret: c.apiKeySecret ? "env" : "unset (minted keys disabled)", day_counter_ttl_hours: 25, minute_limits: "in memory per instance (not stored)" },
     },
     sec_user_agent_configured: c.secUserAgentValid,
     auth_required: c.requireApiKey,

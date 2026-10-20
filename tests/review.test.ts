@@ -100,7 +100,7 @@ describe("M-c: suppression matching and cold-start refusal", () => {
     f.state.failWith = "ERR connection refused";
     const calls: string[] = [];
     vi.stubGlobal("fetch", vi.fn(async (u: RequestInfo | URL, i?: RequestInit) => (calls.push(String(u)), f.fetchStub(u, i))));
-    resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", IP_HASH_SALT: "x".repeat(40), UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" }));
+    resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", IP_HASH_SALT: "x".repeat(40), API_KEY_SECRET: "k".repeat(40), UPSTASH_REDIS_REST_URL: FAKE, UPSTASH_REDIS_REST_TOKEN: "t" }));
     resetSuppressionCache(undefined);
     await expect(loadSuppression()).rejects.toMatchObject({ code: "UPSTREAM_ERROR" });
     await expect(lookupBusinessEntity.run({ name: "Acme", states: ["CO"], match: "contains", limit: 5, active_only: false, include_agent_details: false } as never)).rejects.toMatchObject({ code: "UPSTREAM_ERROR" });
@@ -148,5 +148,54 @@ describe("H-a: per-client upstream concurrency and reserved SEC share for keyed 
     used.length = 0;
     await rl.acquire("anon");
     expect(used).toEqual(["shared"]);
+  });
+});
+
+describe("re-review LOW items and HTTP refund wiring", () => {
+  it("strips variation selectors (U+FE00–FE0F, U+E0100–E01EF)", async () => {
+    const { stripInvisible } = await import("../src/core/untrusted.js");
+    expect(stripInvisible("a\uFE0Fb\u{E0100}c\u{E01EF}d")).toBe("abcd");
+  });
+  it("withholds the entity name when it contains a suppressed person's name (also without spaces)", () => {
+    const sup = parseSuppressions(["agent:Jane Doe"]);
+    const ny = STATE_SOURCES.NY!.normalize(
+      [
+        { dos_id: "1", current_entity_name: "JANE DOE CONSULTING LLC" },
+        { dos_id: "2", current_entity_name: "JANEDOE HOLDINGS LLC" },
+      ],
+      (id) => id,
+    );
+    const out = applyPrivacy(ny, { includeAgentDetails: true, suppression: sup });
+    expect(out.map((e) => e.name)).toEqual(["[withheld]", "[withheld]"]);
+    expect(JSON.stringify(out)).not.toMatch(/JANE/i);
+  });
+  it("classifies only Upstash's plan-limit message as 'plan limit reached'", async () => {
+    const { markRedisDegraded, degradedStatus, clearRedisDegraded } = await import("../src/core/degraded.js");
+    markRedisDegraded(new Error("quota widget failed"));
+    expect(degradedStatus().reason).toBe("redis unavailable");
+    clearRedisDegraded();
+    markRedisDegraded(new Error("ERR max requests limit exceeded. Limit: 500000"));
+    expect(degradedStatus().reason).toBe("redis plan limit reached");
+  });
+  it("refunds the unused estimate after an HTTP tool call (reserve-then-refund)", async () => {
+    resetConfig(loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", QUOTA_ANON_PER_DAY: "6" }));
+    const { createHttpHandler } = await import("../src/http/handler.js");
+    const { MemoryQuotaStore } = await import("../src/core/quota.js");
+    const h = createHttpHandler({ quotaStore: new MemoryQuotaStore() });
+    // Disallowed URL: estimated 4 units, rejected locally (0 upstream requests) -> charged 1.
+    const call = async () =>
+      (
+        await h(
+          new Request("https://x/mcp", {
+            method: "POST",
+            headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-real-ip": "192.0.2.77" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "get_filing_document", arguments: { url: "https://www.sec.gov/cgi-bin/x" } } }),
+          }),
+        )
+      ).text();
+    expect(await call()).toContain("INVALID_INPUT");
+    expect(await call()).toContain("INVALID_INPUT"); // without the refund: 4 + 4 > 6 -> RATE_LIMITED
+    expect(await call()).toContain("INVALID_INPUT"); // 1 + 1 + 4 = 6 fits
+    expect(await call()).toContain("RATE_LIMITED"); // 1 + 1 + 1 + 4 = 7 > 6
   });
 });

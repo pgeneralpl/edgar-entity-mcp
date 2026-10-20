@@ -30,7 +30,9 @@ export function wrapUntrusted(text: string, id: string = newMarkerId()): { text:
  * overrides and isolates, word joiner and invisible operators, BOM, and Unicode TAG characters
  * (U+E0000–U+E007F, used for "ASCII smuggling").
  */
-const INVISIBLE_RE = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF\u{E0000}-\u{E007F}]/gu;
+// Variation selectors are listed on purpose (they are what we strip), hence the lint exception.
+// eslint-disable-next-line no-misleading-character-class
+const INVISIBLE_RE = /[\u00AD\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFE00-\uFE0F\uFEFF\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}]/gu;
 
 export function stripInvisible(text: string): string {
   return text.replace(INVISIBLE_RE, "");

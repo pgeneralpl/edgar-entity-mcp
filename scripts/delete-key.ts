@@ -5,8 +5,9 @@
  *   UPSTASH_REDIS_REST_URL=... UPSTASH_REDIS_REST_TOKEN=... IP_HASH_SALT=... npx tsx scripts/delete-key.ts <key-or-id>
  *
  * Running instances memoise key lookups for at most 5 minutes, so a deleted key stops working
- * within 5 minutes everywhere. (While Redis is unavailable — degraded mode — MAC-valid keys are
- * accepted at default limits; to revoke ALL keys immediately, rotate API_KEY_SECRET.)
+ * within 5 minutes everywhere. For immediate revocation (also while Redis is unavailable, when
+ * MAC-valid keys are accepted unverified) add the id to REVOKED_KEY_IDS; rotating API_KEY_SECRET
+ * revokes all keys.
  */
 import { Redis } from "@upstash/redis";
 import { config } from "../src/config.js";

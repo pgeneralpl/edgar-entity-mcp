@@ -3,7 +3,7 @@ import type { AuthInfo } from "@modelcontextprotocol/server";
 import { registerAll, SERVER_INSTRUCTIONS, warnIfDefaultUserAgent } from "../server.js";
 import { config } from "../config.js";
 import { getUserUsageHooks, setSystemUsageHook, setUsageHooks, stderrUsageLogger } from "../core/usage.js";
-import { chargeQuota, type Principal, type QuotaStore } from "../core/quota.js";
+import { chargeQuota, settleQuota, type Principal, type QuotaStore } from "../core/quota.js";
 import { clientIp, ipPrincipal, keyFailuresExceeded, recordKeyFailure, verifyApiKey } from "../core/apiKeys.js";
 import { logError } from "../core/errors.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
@@ -60,6 +60,9 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
   setSystemUsageHook("quota", {
     async beforeCall(e) {
       if (e.transport === "http" && e.principal) await chargeQuota(e.principal, e.tool, e.args, opts.quotaStore);
+    },
+    afterCall() {
+      settleQuota(); // refund estimate − actual upstream cost (local, no Redis command)
     },
   });
 

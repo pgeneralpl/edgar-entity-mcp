@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
+import { LRUCache } from "lru-cache";
 import type { Redis } from "@upstash/redis";
 import { config } from "../config.js";
 import { ToolError, logError } from "./errors.js";
 import { getRedis } from "./cache.js";
 import { markRedisDegraded, redisDegraded } from "./degraded.js";
+import { currentContext } from "./context.js";
 
 /**
  * Per-client quotas for the hosted HTTP endpoint, in "units" that approximate upstream cost
@@ -31,8 +33,11 @@ export interface Limits {
   perDay: number;
   /** Daily cap shared by all anonymous clients of one network (limits IP rotation). */
   networkPerDay?: number;
-  /** Daily cap shared by ALL anonymous clients of the deployment. */
+  /** Soft daily cap shared by ALL anonymous clients; past it each IP still gets `tricklePerDay`. */
   globalPerDay?: number;
+  /** Hard daily ceiling for all anonymous clients (soft cap + trickles). */
+  globalHardPerDay?: number;
+  tricklePerDay?: number;
 }
 
 export interface QuotaDecision {
@@ -43,8 +48,14 @@ export interface QuotaDecision {
   retryAfterSeconds?: number;
 }
 
+/**
+ * Daily quota store (fleet-wide with Redis). Per-minute limits are enforced per instance in memory
+ * (see chargeQuota) and never cost a Redis command.
+ */
 export interface QuotaStore {
-  consume(p: Principal, cost: number, limits: Limits): Promise<QuotaDecision>;
+  consume(p: Principal, cost: number, limits: Limits, now?: number): Promise<QuotaDecision>;
+  /** Give back units reserved but not used (actual cost < estimate). Must be cheap / local. */
+  refund?(p: Principal, units: number, limits: Limits, now?: number): void;
 }
 
 const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) ? v : d);
@@ -84,14 +95,19 @@ export function toolCost(tool: string, args: unknown): number {
 export function limitsFor(p: Principal): Limits {
   const q = config().quota;
   if (p.tier === "key") return { perMinute: p.perMinute ?? q.keyPerMinute, perDay: p.perDay ?? q.keyPerDay };
-  return { perMinute: q.anonPerMinute, perDay: q.anonPerDay, networkPerDay: q.anonNetworkPerDay, globalPerDay: q.anonGlobalPerDay };
+  return {
+    perMinute: q.anonPerMinute,
+    perDay: q.anonPerDay,
+    networkPerDay: q.anonNetworkPerDay,
+    globalPerDay: q.anonGlobalPerDay,
+    globalHardPerDay: q.anonGlobalHardPerDay,
+    tricklePerDay: q.anonTricklePerDay,
+  };
 }
 
-/**
- * Retention = enforced window. Daily counters live 25 h (the UTC day + 1 h slack for clock skew);
- * per-minute counters 70 s (the minute + 10 s slack). Nothing else is stored.
- */
+/** Daily counters live 25 h (the UTC day + 1 h slack for clock skew). Nothing else is stored. */
 export const DAY_COUNTER_TTL_SECONDS = 25 * 3600;
+/** Per-minute counters are in-memory only (kept 70 s). */
 export const MINUTE_COUNTER_TTL_SECONDS = 70;
 
 export function utcDay(now = Date.now()): string {
@@ -102,82 +118,138 @@ export function secondsToUtcMidnight(now = Date.now()): number {
   return Math.max(1, Math.ceil((Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) - now) / 1000));
 }
 
-/** One counter checked and incremented atomically. Order matters: long windows first. */
+/** One daily counter. Order matters: the caller's own counter first (the trickle rule reads it). */
 interface Counter {
   id: string;
-  scope: NonNullable<QuotaDecision["scope"]>;
+  scope: "day" | "network" | "global";
   limit: number;
-  window: "day" | "minute";
 }
 
-function countersFor(p: Principal, l: Limits, now: number): { counters: Counter[]; day: string; minute: number } {
+function dayCounters(p: Principal, l: Limits, now: number): Counter[] {
   const day = p.day ?? utcDay(now);
-  const minute = Math.floor(now / 60_000);
-  const counters: Counter[] = [{ id: `q:d:${p.id}:${day}`, scope: "day", limit: l.perDay, window: "day" }];
-  if (p.network && l.networkPerDay) counters.push({ id: `q:d:${p.network}:${day}`, scope: "network", limit: l.networkPerDay, window: "day" });
-  if (p.tier === "anon" && l.globalPerDay) counters.push({ id: `q:d:anon:${day}`, scope: "global", limit: l.globalPerDay, window: "day" });
-  counters.push({ id: `q:m:${p.id}:${minute}`, scope: "minute", limit: l.perMinute, window: "minute" });
-  return { counters, day, minute };
+  const counters: Counter[] = [{ id: `q:d:${p.id}:${day}`, scope: "day", limit: l.perDay }];
+  if (p.network && l.networkPerDay) counters.push({ id: `q:d:${p.network}:${day}`, scope: "network", limit: l.networkPerDay });
+  if (p.tier === "anon" && l.globalPerDay) counters.push({ id: `q:d:anon:${day}`, scope: "global", limit: l.globalPerDay });
+  return counters;
 }
 
-function blockedDecision(c: Counter, used: number, now: number, minute: number): QuotaDecision {
-  const retry = c.window === "day" ? secondsToUtcMidnight(now) : Math.max(1, Math.ceil(((minute + 1) * 60_000 - now) / 1000));
-  return { ok: false, scope: c.scope, limit: c.limit, remaining: Math.max(0, c.limit - used), retryAfterSeconds: retry };
+/**
+ * Check counter values *after* applying `deltas`. Returns the index of the first violated counter, or -1.
+ * Only counters this call adds to (delta > 0) can be violated. Global cap is soft: past `limit`
+ * the call is still allowed while the caller's own counter is within the trickle allowance and the
+ * global total is below the hard ceiling. Unknown values (NaN) never cause a violation.
+ */
+function violation(counters: Counter[], values: number[], deltas: number[], l: Limits): number {
+  for (let i = 0; i < counters.length; i++) {
+    if (!(deltas[i]! > 0)) continue;
+    const c = counters[i]!;
+    const v = values[i]!;
+    if (Number.isNaN(v)) continue;
+    if (c.scope === "global") {
+      const own = values[0]!; // unknown own usage: not refused here (the script decides)
+      if (v > (l.globalHardPerDay ?? c.limit) || (v > c.limit && !Number.isNaN(own) && own > (l.tricklePerDay ?? 0))) return i;
+    } else if (v > c.limit) return i;
+  }
+  return -1;
 }
+
+function blocked(c: Counter, used: number, now: number): QuotaDecision {
+  return { ok: false, scope: c.scope, limit: c.limit, remaining: Math.max(0, c.limit - used), retryAfterSeconds: secondsToUtcMidnight(now) };
+}
+
+const DAY_MS_TTL = (now: number) => secondsToUtcMidnight(now) * 1000 + 60_000;
 
 /** In-process store (self-hosted HTTP without Redis, degraded mode, and tests). Same semantics as Redis. */
 export class MemoryQuotaStore implements QuotaStore {
-  private counts = new Map<string, { v: number; exp: number }>();
+  private counts = new LRUCache<string, number>({ max: 100_000, ttl: DAY_COUNTER_TTL_SECONDS * 1000 });
   constructor(private now: () => number = Date.now) {}
-  async consume(p: Principal, cost: number, l: Limits): Promise<QuotaDecision> {
-    const t = this.now();
-    if (this.counts.size > 20_000) for (const [k, v] of this.counts) if (v.exp <= t) this.counts.delete(k);
-    const { counters, minute } = countersFor(p, l, t);
-    const get = (id: string) => {
-      const e = this.counts.get(id);
-      return e && e.exp > t ? e.v : 0;
-    };
-    for (const c of counters) {
-      const used = get(c.id);
-      if (used + cost > c.limit) return blockedDecision(c, used, t, minute);
+  async consume(p: Principal, cost: number, l: Limits, at = this.now()): Promise<QuotaDecision> {
+    const counters = dayCounters(p, l, at);
+    const after = counters.map((c) => (this.counts.get(c.id) ?? 0) + cost);
+    const bad = violation(
+      counters,
+      after,
+      counters.map(() => cost),
+      l,
+    );
+    if (bad >= 0) return blocked(counters[bad]!, after[bad]! - cost, at);
+    counters.forEach((c, i) => this.counts.set(c.id, after[i]!, { ttl: DAY_MS_TTL(at) }));
+    return { ok: true, limit: counters[0]!.limit, remaining: counters[0]!.limit - after[0]! };
+  }
+  refund(p: Principal, units: number, l: Limits, at = this.now()): void {
+    if (units <= 0) return;
+    for (const c of dayCounters(p, l, at)) {
+      const v = this.counts.get(c.id);
+      if (v !== undefined) this.counts.set(c.id, Math.max(0, v - units), { noUpdateTTL: true });
     }
-    for (const c of counters)
-      this.counts.set(c.id, { v: get(c.id) + cost, exp: t + 1000 * (c.window === "day" ? DAY_COUNTER_TTL_SECONDS : MINUTE_COUNTER_TTL_SECONDS) });
-    const d = counters[0]!;
-    return { ok: true, limit: d.limit, remaining: d.limit - get(d.id) };
   }
 }
 
 /**
- * ALL quota counters in ONE Redis command (EVALSHA): MGET every counter, refuse if any would
- * exceed its limit (reporting the first, longest-window one), otherwise INCRBY each and set its TTL
- * on first use. Values are integers; keys are hashed ids + window number.
+ * ONE Lua script per allowed call. Billed Upstash commands = 1 (EVALSHA) + 1 INCRBY per counter
+ * whose delta is non-zero (+1 EXPIRE the first time a counter is created each day):
+ *   anonymous: 1 + 3 (IP day, /24 day, global anon day) = 4;   API key: 1 + 1 = 2.
+ * A refusal inside the script adds 1 DECRBY per counter touched (rollback); refusals are normally
+ * answered locally from the memoised counter values, at 0 commands.
+ *
+ * KEYS = counters. ARGV = [ttl, cost, globalIndex (0 = none), hard, trickle, d1..dn, lim1..limn].
+ * d_i = cost - pending refund credit for that counter (can be <= 0). Returns {bad, v1..vn} with
+ * values after the call (after rollback if refused); 'u' = not touched (unknown).
+ * EXPIRE runs only when INCRBY created the key (v == delta), inside the same atomic script, so a
+ * counter can never exist without a TTL.
  */
 const QUOTA_SCRIPT = `
-local cost = tonumber(ARGV[1])
 local n = #KEYS
-local used = redis.call('MGET', unpack(KEYS))
+local ttl = tonumber(ARGV[1])
+local cost = tonumber(ARGV[2])
+local gi = tonumber(ARGV[3])
+local hard = tonumber(ARGV[4])
+local trickle = tonumber(ARGV[5])
+local vals = {}
 for i = 1, n do
-  local u = tonumber(used[i] or '0')
-  if u + cost > tonumber(ARGV[1 + i]) then return {0, i, u} end
+  local d = tonumber(ARGV[5 + i])
+  if d ~= 0 then
+    local v = redis.call('INCRBY', KEYS[i], d)
+    if v == d then redis.call('EXPIRE', KEYS[i], ttl) end
+    vals[i] = v
+  else
+    vals[i] = 'u'
+  end
 end
-local first = 0
+local bad = 0
 for i = 1, n do
-  local v = redis.call('INCRBY', KEYS[i], cost)
-  if v == cost then redis.call('EXPIRE', KEYS[i], tonumber(ARGV[1 + n + i])) end
-  if i == 1 then first = v end
+  local d = tonumber(ARGV[5 + i])
+  local lim = tonumber(ARGV[5 + n + i])
+  if d > 0 and vals[i] ~= 'u' then
+    if i == gi then
+      local own = vals[1]
+      if vals[i] > hard or (vals[i] > lim and own ~= 'u' and own > trickle) then bad = i break end
+    elseif vals[i] > lim then bad = i break end
+  end
 end
-return {1, 0, first}
+if bad > 0 then
+  for i = 1, n do
+    if vals[i] ~= 'u' then vals[i] = redis.call('DECRBY', KEYS[i], cost) end
+  end
+end
+local out = {bad}
+for i = 1, n do out[i + 1] = vals[i] end -- integers; 'u' (string) = unknown
+return out
 `;
 export const QUOTA_SCRIPT_SHA = createHash("sha1").update(QUOTA_SCRIPT).digest("hex");
 
 /**
- * Redis store. Allowed call = 1 Redis command. Blocks are memoised in memory until the window ends
- * (UTC midnight for day / network / global caps), so repeat calls from a blocked client, network or
- * an exhausted global budget cost 0 Redis commands on this instance.
+ * Redis store.
+ * - Memoises the last known value of every counter until UTC midnight. Counters only grow within a
+ *   day (except by our own refunds), so a known value is a lower bound: when `cost` would exceed
+ *   any counter's remaining allowance the call is refused locally, at 0 Redis commands — for the
+ *   caller's own counter, its /24 and the global anonymous budget alike.
+ * - Refunds (estimate − actual cost) are kept as local credit per counter and folded into the next
+ *   reservation's INCRBY for that counter, so they cost no extra commands.
  */
 export class UpstashQuotaStore implements QuotaStore {
-  private blocked = new Map<string, { until: number; d: QuotaDecision }>();
+  private known = new LRUCache<string, number>({ max: 50_000, ttl: DAY_COUNTER_TTL_SECONDS * 1000 });
+  private credit = new LRUCache<string, number>({ max: 50_000, ttl: DAY_COUNTER_TTL_SECONDS * 1000 });
   constructor(
     private redis: Redis,
     private prefix = config().cachePrefix,
@@ -191,26 +263,50 @@ export class UpstashQuotaStore implements QuotaStore {
       return await this.redis.eval(QUOTA_SCRIPT, keys, args);
     }
   }
-  async consume(p: Principal, cost: number, l: Limits): Promise<QuotaDecision> {
-    const t = this.now();
-    const { counters, minute } = countersFor(p, l, t);
-    for (const c of counters) {
-      const b = this.blocked.get(c.id);
-      if (b && b.until > t) return { ...b.d, retryAfterSeconds: Math.max(1, Math.ceil((b.until - t) / 1000)) };
+  async consume(p: Principal, cost: number, l: Limits, at = this.now()): Promise<QuotaDecision> {
+    const counters = dayCounters(p, l, at);
+    const deltas = counters.map((c) => cost - (this.credit.get(c.id) ?? 0));
+    // Local pre-check against memoised values (lower bounds; already net of local refunds):
+    // refused here at 0 Redis commands.
+    const projected = counters.map((c) => {
+      const k = this.known.get(c.id);
+      return k === undefined ? NaN : k + cost;
+    });
+    const localBad = violation(counters, projected, deltas, l);
+    if (localBad >= 0) return blocked(counters[localBad]!, projected[localBad]! - cost, at);
+
+    const gi = counters.findIndex((c) => c.scope === "global") + 1;
+    const args = [
+      String(DAY_COUNTER_TTL_SECONDS),
+      String(cost),
+      String(gi),
+      String(l.globalHardPerDay ?? 0),
+      String(l.tricklePerDay ?? 0),
+      ...deltas.map(String),
+      ...counters.map((c) => String(c.limit)),
+    ];
+    const raw = (await this.exec(
+      counters.map((c) => this.prefix + c.id),
+      args,
+    )) as unknown[];
+    const bad = Number(raw[0]);
+    const vals = counters.map((_, i) => (typeof raw[i + 1] === "number" ? (raw[i + 1] as number) : NaN));
+    const ttl = DAY_MS_TTL(at);
+    counters.forEach((c, i) => {
+      if (Number.isNaN(vals[i]!)) return;
+      this.known.set(c.id, vals[i]!, { ttl });
+      this.credit.delete(c.id); // credit was applied by this INCRBY
+    });
+    if (bad > 0) return blocked(counters[bad - 1]!, vals[bad - 1]!, at);
+    return { ok: true, limit: counters[0]!.limit, remaining: counters[0]!.limit - (vals[0] ?? 0) };
+  }
+  refund(p: Principal, units: number, l: Limits, at = this.now()): void {
+    if (units <= 0) return;
+    for (const c of dayCounters(p, l, at)) {
+      this.credit.set(c.id, (this.credit.get(c.id) ?? 0) + units, { ttl: DAY_MS_TTL(at) });
+      const k = this.known.get(c.id);
+      if (k !== undefined) this.known.set(c.id, k - units, { noUpdateTTL: true });
     }
-    const keys = counters.map((c) => this.prefix + c.id);
-    const args = [String(cost), ...counters.map((c) => String(c.limit)), ...counters.map((c) => String(c.window === "day" ? DAY_COUNTER_TTL_SECONDS : MINUTE_COUNTER_TTL_SECONDS))];
-    const [ok, idx, val] = ((await this.exec(keys, args)) as [number, number, number]).map(Number) as [number, number, number];
-    if (ok === 1) return { ok: true, limit: counters[0]!.limit, remaining: counters[0]!.limit - val };
-    const c = counters[idx - 1]!;
-    const d = blockedDecision(c, val, t, minute);
-    // A full counter only grows within its window, so the block holds until the window ends.
-    // (Cheaper calls might still fit; only cache when not even a 1-unit call would.)
-    if (val + 1 > c.limit || cost <= 1) {
-      if (this.blocked.size > 10_000) this.blocked.clear();
-      this.blocked.set(c.id, { until: t + d.retryAfterSeconds! * 1000, d });
-    }
-    return d;
   }
 }
 
@@ -218,13 +314,30 @@ let store: QuotaStore | undefined;
 const fallback = new MemoryQuotaStore();
 export function getQuotaStore(): QuotaStore {
   if (!store) {
-    const r = getRedis();
-    store = r ? new UpstashQuotaStore(r) : fallback;
+    const redis = getRedis();
+    store = redis ? new UpstashQuotaStore(redis) : new MemoryQuotaStore();
   }
   return store;
 }
 export function setQuotaStore(s: QuotaStore | undefined): void {
   store = s;
+}
+
+/** Per-instance per-minute limits (in memory, never Redis). */
+const minuteCounts = new LRUCache<string, number>({ max: 100_000, ttl: MINUTE_COUNTER_TTL_SECONDS * 1000 });
+function chargeMinute(p: Principal, cost: number, l: Limits, now: number): QuotaDecision {
+  const minute = Math.floor(now / 60_000);
+  const id = `${p.id}:${minute}`;
+  const used = minuteCounts.get(id) ?? 0;
+  if (used + cost > l.perMinute)
+    return { ok: false, scope: "minute", limit: l.perMinute, remaining: Math.max(0, l.perMinute - used), retryAfterSeconds: Math.max(1, Math.ceil(((minute + 1) * 60_000 - now) / 1000)) };
+  minuteCounts.set(id, used + cost);
+  return { ok: true };
+}
+function refundMinute(p: Principal, units: number, at: number): void {
+  const id = `${p.id}:${Math.floor(at / 60_000)}`;
+  const used = minuteCounts.get(id);
+  if (used !== undefined) minuteCounts.set(id, Math.max(0, used - units), { noUpdateTTL: true });
 }
 
 export function rateLimitedError(p: Principal, d: QuotaDecision, cost: number): ToolError {
@@ -238,6 +351,13 @@ export function rateLimitedError(p: Principal, d: QuotaDecision, cost: number): 
           ? "anonymous clients (per IP)"
           : "this API key";
   const per = d.scope === "minute" ? "minute" : "day (UTC)";
+  if (d.scope === "global")
+    return new ToolError(
+      "RATE_LIMITED",
+      `The shared daily budget for anonymous use of this server is spent (${d.limit} units across all anonymous clients), and this IP has used its ${c.quota.anonTricklePerDay}-unit fallback allowance. This call costs ${cost} unit(s).`,
+      `Retry after ${d.retryAfterSeconds}s (UTC midnight), request a free API key at ${c.keyRequestUrl}, or run the server locally with \`npx -y edgar-entity-mcp\`.`,
+      { retry_after_seconds: d.retryAfterSeconds, scope: d.scope, limit: d.limit, cost },
+    );
   const hint =
     p.tier === "anon"
       ? `Retry after ${d.retryAfterSeconds}s. For a higher quota, request a free API key at ${c.keyRequestUrl} and send it as "Authorization: Bearer <key>" (or "x-api-key"). Or run the server locally with \`npx -y edgar-entity-mcp\` (no quota; set SEC_USER_AGENT to your own name + email).`
@@ -264,34 +384,79 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   ]).finally(() => clearTimeout(timer));
 }
 
+interface Reservation {
+  p: Principal;
+  cost: number;
+  limits: Limits;
+  store: QuotaStore;
+  at: number;
+}
+
 /**
- * Charge a tool call to a principal; throws RATE_LIMITED when over quota. If the Redis store fails
- * (unreachable, timeout, plan limit), the server enters degraded mode and enforces the same limits
- * per instance in memory instead of refusing every call. A custom (non-Redis) store that fails
- * still fails closed.
+ * Reserve the estimated cost of a tool call (throws RATE_LIMITED when over quota); settleQuota()
+ * refunds the difference to the actual cost after the call. If the Redis store fails (unreachable,
+ * timeout, plan limit), the server enters degraded mode and enforces the same daily limits per
+ * instance in memory. A custom (non-Redis) store that fails still fails closed.
  */
 export async function chargeQuota(p: Principal, tool: string, args: unknown, s: QuotaStore = getQuotaStore()): Promise<void> {
   const cost = toolCost(tool, args);
   if (cost <= 0) return;
   const limits = limitsFor(p);
+  const at = Date.now();
+  const m = chargeMinute(p, cost, limits, at);
+  if (!m.ok) throw rateLimitedError(p, m, cost);
   let d: QuotaDecision;
+  let used: QuotaStore = s;
   const redisBacked = s instanceof UpstashQuotaStore;
-  if (redisBacked && redisDegraded()) d = await fallback.consume(p, cost, limits);
-  else
-    try {
-      d = await withTimeout(s.consume(p, cost, limits), QUOTA_TIMEOUT_MS);
-    } catch (e) {
-      if (!redisBacked) {
-        logError("quota", e);
-        throw new ToolError("RATE_LIMITED", "Rate limiting is temporarily unavailable, so the call was refused.", "Retry in a few seconds.", { retry_after_seconds: 5, scope: "backend" });
+  try {
+    if (redisBacked && redisDegraded()) {
+      used = fallback;
+      d = await fallback.consume(p, cost, limits, at);
+    } else
+      try {
+        d = await withTimeout(s.consume(p, cost, limits, at), QUOTA_TIMEOUT_MS);
+      } catch (e) {
+        if (!redisBacked) {
+          logError("quota", e);
+          throw new ToolError("RATE_LIMITED", "Rate limiting is temporarily unavailable, so the call was refused.", "Retry in a few seconds.", { retry_after_seconds: 5, scope: "backend" });
+        }
+        markRedisDegraded(e);
+        used = fallback;
+        d = await fallback.consume(p, cost, limits, at);
       }
-      markRedisDegraded(e);
-      d = await fallback.consume(p, cost, limits);
-    }
-  if (!d.ok) throw rateLimitedError(p, d, cost);
+  } catch (e) {
+    refundMinute(p, cost, at);
+    throw e;
+  }
+  if (!d.ok) {
+    refundMinute(p, cost, at);
+    throw rateLimitedError(p, d, cost);
+  }
+  const ctx = currentContext();
+  if (ctx) ctx.reservation = { p, cost, limits, store: used, at } satisfies Reservation;
+}
+
+/**
+ * Settle the reservation of the current call: actual cost = upstream requests made, minimum 1
+ * (a fully cached call still uses the server), capped at the estimate. The rest is refunded.
+ */
+export function settleQuota(): void {
+  const ctx = currentContext();
+  const r = ctx?.reservation as Reservation | undefined;
+  if (!ctx || !r) return;
+  ctx.reservation = undefined;
+  const actual = Math.min(r.cost, Math.max(1, ctx.upstream ?? 0));
+  const back = r.cost - actual;
+  if (back <= 0) return;
+  r.store.refund?.(r.p, back, r.limits, r.at);
+  refundMinute(r.p, back, r.at);
 }
 
 /** For tests. */
 export function memoryFallbackStore(): MemoryQuotaStore {
   return fallback;
+}
+/** For tests. */
+export function resetMinuteCounters(): void {
+  minuteCounts.clear();
 }

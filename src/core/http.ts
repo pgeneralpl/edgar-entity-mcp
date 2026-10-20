@@ -3,6 +3,7 @@ import { cached, getRedis, type CacheOptions } from "./cache.js";
 import { HttpError, ToolError } from "./errors.js";
 import { ClientSlots, RateLimiter, upstashTokenBucket } from "./rateLimiter.js";
 import { currentContext } from "./context.js";
+import { redisDegraded } from "./degraded.js";
 
 export type Source = "sec" | "socrata";
 
@@ -30,7 +31,7 @@ function limiterFor(source: Source): RateLimiter {
     return secLimiter;
   }
   if (!socrataLimiter)
-    socrataLimiter = new RateLimiter(c.socrataMaxRps, redis ? upstashTokenBucket(redis, c.socrataMaxRps, "socrata") : undefined, { name: "state-registry", degradedRps: 2 });
+    socrataLimiter = new RateLimiter(c.socrataMaxRps, redis ? upstashTokenBucket(redis, c.socrataMaxRps, "socrata") : undefined, { name: "state-registry", degradedRps: 1 });
   return socrataLimiter;
 }
 
@@ -159,6 +160,15 @@ export interface FetchOptions {
 export async function fetchRaw(url: string, source: Source, opts: FetchOptions = {}): Promise<string> {
   if (source === "sec") assertSecUserAgent();
   const ctx = currentContext();
+  // M1: in degraded mode anonymous HTTP callers are served from cache only (anything reaching
+  // fetchRaw was not cached). API-key callers continue at the degraded per-instance rate.
+  if (ctx?.transport === "http" && ctx.principal?.tier !== "key" && redisDegraded() && getRedis())
+    throw new ToolError(
+      "RATE_LIMITED",
+      "The hosted server is in degraded mode (its shared rate-limit store is unavailable), so anonymous requests are answered from cache only, and this data is not cached.",
+      `Retry in a few minutes, use an API key (${config().keyRequestUrl}), or run the server locally with \`npx -y edgar-entity-mcp\`.`,
+      { retry_after_seconds: 120, scope: "degraded" },
+    );
   return clientSlots().run(ctx?.transport === "http" ? ctx.principal?.id : undefined, () => fetchRawInner(url, source, opts, ctx?.principal?.tier ?? "anon"));
 }
 
@@ -172,6 +182,8 @@ async function fetchRawInner(url: string, source: Source, opts: FetchOptions, ti
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     await limiter.acquire(tier); // RATE_LIMITED when the fleet budget is exhausted; degraded local rate if Redis is down
     httpStats.requests++;
+    const cctx = currentContext();
+    if (cctx) cctx.upstream = (cctx.upstream ?? 0) + 1; // actual cost, for quota settlement
     try {
       const res = await fetch(target, {
         headers: headersFor(source, opts.accept),
