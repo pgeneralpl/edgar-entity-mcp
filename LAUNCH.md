@@ -6,10 +6,11 @@ Repo: https://github.com/pgeneralpl/edgar-entity-mcp · Live endpoint: `https://
 
 1. ~~`gh repo create pgeneralpl/edgar-entity-mcp --public --source . --push`~~ (done)
 2. ~~Set owner `pgeneralpl` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file~~ (done)
-3. `npm login && npm publish --access public`. The name `edgar-entity-mcp` was available on 2026-10-20.
+3. `npm publish --access public`. npm requires 2FA on the account (or a granular token with "bypass 2FA") to publish: enable it at npmjs.com → Account → Two-Factor Authentication (security key/passkey or authenticator app), then publish with `--otp <code>`. The name `edgar-entity-mcp` was still free on 2026-10-20.
 4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`). Still open: accept the Upstash marketplace terms in the Vercel dashboard, then add the free Upstash Redis store (`vercel integration add upstash/upstash-kv --plan free -m primaryRegion=iad1 -m autoUpgrade=false`) so the cache and rate budget are shared; and install the Vercel GitHub App on the repo for push-to-deploy.
-5. MCP Registry: `mcp-publisher login github && mcp-publisher publish`. This uses `server.json`; the npm ownership check needs `mcpName` in the published package.json.
-6. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → `https://edgar-entity-mcp.vercel.app/mcp`. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
+5. Future releases: bump the version in `package.json` and `server.json` (both places), commit, then `gh release create vX.Y.Z`. `.github/workflows/release.yml` publishes to npm via Trusted Publishing and to the MCP Registry via GitHub OIDC (after the one-time `npm trust github …` setup noted in that file).
+6. MCP Registry (first release, manual): `mcp-publisher login github && mcp-publisher publish`. This uses `server.json`; the npm ownership check needs `mcpName` in the published package.json.
+7. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → `https://edgar-entity-mcp.vercel.app/mcp`. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
 
 ---
 

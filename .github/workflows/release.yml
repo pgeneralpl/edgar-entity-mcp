@@ -1,0 +1,53 @@
+name: Release
+# Publishes to npm (Trusted Publishing via GitHub OIDC, with provenance) and to the
+# official MCP Registry (GitHub OIDC) when a GitHub release is published.
+# One-time setup after the first manual `npm publish`:
+#   npm trust github edgar-entity-mcp --file release.yml --repo pgeneralpl/edgar-entity-mcp --allow-publish --yes
+# (or npmjs.com → package → Settings → Trusted Publisher → GitHub Actions, workflow `release.yml`).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # npm Trusted Publishing + MCP Registry OIDC
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24 # npm >= 11.5.1 is required for Trusted Publishing
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - name: Check versions match the tag
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          SRV=$(node -p "require('./server.json').version")
+          SRV_NPM=$(node -p "require('./server.json').packages[0].version")
+          echo "package.json=$PKG server.json=$SRV server.json npm=$SRV_NPM ref=$GITHUB_REF_NAME"
+          [ "$PKG" = "$SRV" ] && [ "$PKG" = "$SRV_NPM" ] || { echo "::error::version mismatch"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" = "release" ] && [ "$GITHUB_REF_NAME" != "v$PKG" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match v$PKG"; exit 1
+          fi
+          echo "VERSION=$PKG" >> "$GITHUB_ENV"
+      - run: npm ci
+      - name: Publish to npm (skipped if this version is already published)
+        run: |
+          if npm view "edgar-entity-mcp@$VERSION" version >/dev/null 2>&1; then
+            echo "::notice::edgar-entity-mcp@$VERSION already on npm; skipping"
+          else
+            npm publish --access public
+          fi
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+      - name: Publish to the MCP Registry
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
