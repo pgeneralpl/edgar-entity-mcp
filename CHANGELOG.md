@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- **Node.js runtime (security release 2026-10-21, CVE-2026-111497 Brotli decoder OOB write, TLS hostname bypasses, undici):** `engines.node` `>=20` → `24.x` (Vercel runtime pin); `.nvmrc` / `.node-version` 24.22.1; CI matrix 22.x + 24.x with `check-latest` and a patched-version assertion (`scripts/check-node-version.mjs`); release workflow on `.nvmrc`. Stdio users need Node.js ≥ 22.23.4 or ≥ 24.22.1; the CLI warns on stderr otherwise. Node.js 20 (EOL) is no longer supported.
+
 Security hardening (audit 2026-10-20).
 
 - **Quotas (C1):** cost-weighted per-IP and per-API-key limits on the HTTP endpoint (anonymous 30 units/min and 300/day per IP plus 1,500/day per /24 network and 2,000/day for all anonymous callers; free key 120/min, 2,000/day), with `RATE_LIMITED` errors carrying `retry_after_seconds` and a key-request hint. Self-verifying API keys (`scripts/create-key.ts`, `scripts/delete-key.ts`, `REVOKED_KEY_IDS`). JSON-RPC batches rejected; insider fan-out capped at 20 filings, entity lookups at 5 states.

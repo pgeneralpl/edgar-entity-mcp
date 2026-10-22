@@ -101,9 +101,11 @@ Other quick examples:
 
 ## Install
 
-Three ways to connect: the hosted endpoint `https://edgar-entity-mcp.vercel.app/mcp` (no install, see *Remote* below), the npm package [`edgar-entity-mcp`](https://www.npmjs.com/package/edgar-entity-mcp) over stdio (Node.js 20+), or any client that installs from the official [MCP Registry](https://registry.modelcontextprotocol.io) entry `io.github.pgeneralpl/edgar-entity-mcp`.
+Three ways to connect: the hosted endpoint `https://edgar-entity-mcp.vercel.app/mcp` (no install, see *Remote* below), the npm package [`edgar-entity-mcp`](https://www.npmjs.com/package/edgar-entity-mcp) over stdio (**Node.js ≥ 22.23.4 or ≥ 24.22.1**), or any client that installs from the official [MCP Registry](https://registry.modelcontextprotocol.io) entry `io.github.pgeneralpl/edgar-entity-mcp`.
 
 Quick check: `npx -y edgar-entity-mcp --version`
+
+> **Node.js version (stdio users):** run the package on a patched Node.js — **22.23.4+ (22.x) or 24.22.1+ (24.x, recommended)**, or 26.12.1+. These releases (2026-10-21) fix CVE-2026-111497, a Brotli decoder out-of-bounds write that a malicious server response decoded by `fetch()` could trigger, plus TLS hostname-verification bypasses. Node.js 20 is end-of-life and will not get the fix. Check with `node -v`; the server prints a warning on stderr when started on an unpatched Node.js. The hosted endpoint runs on Vercel's managed Node.js 24.x runtime, which Vercel patches itself. `engines.node` is `24.x` (it pins the Vercel runtime), so npm prints an `EBADENGINE` notice on 22.x — that is expected and harmless on 22.23.4+.
 
 ### Claude Desktop / Claude Code / Cursor / Windsurf / VS Code (stdio via npx)
 

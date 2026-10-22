@@ -109,3 +109,11 @@ describe("filing filters", () => {
     expect(matchesFilter(f, { dateFrom: "2024-02-01" })).toBe(false);
   });
 });
+
+describe("patched Node.js detection (2026-10-21 security release)", () => {
+  it("accepts only patched 22/24/26 releases", async () => {
+    const { isPatchedNode } = await import("../src/core/nodeVersion.js");
+    for (const v of ["22.23.4", "22.24.0", "24.22.1", "v24.23.0", "26.12.1", "27.0.0"]) expect(isPatchedNode(v)).toBe(true);
+    for (const v of ["20.19.2", "20.99.0", "22.23.3", "22.9.9", "24.22.0", "24.9.9", "25.9.0", "26.12.0"]) expect(isPatchedNode(v)).toBe(false);
+  });
+});

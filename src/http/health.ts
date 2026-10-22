@@ -5,6 +5,7 @@ import { SUPPORTED_STATES } from "../states/registry.js";
 import { getRedis } from "../core/cache.js";
 import { logError } from "../core/errors.js";
 import { degradedStatus } from "../core/degraded.js";
+import { isPatchedNode } from "../core/nodeVersion.js";
 
 /** Public health payload. Reports configuration *shape* only, never secret values. */
 export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
@@ -35,6 +36,8 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
       state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, api_key_secret: c.apiKeySecret ? "env" : "unset (minted keys disabled)", day_counter_ttl_hours: 25, minute_limits: "in memory per instance (not stored)" },
     },
     sec_user_agent_configured: c.secUserAgentValid,
+    // Only whether the runtime has the 2026-10-21 Node.js security fixes; the exact version is not exposed.
+    node_runtime_patched: isPatchedNode(),
     auth_required: c.requireApiKey,
     states: SUPPORTED_STATES,
   };

@@ -51,7 +51,7 @@
     "LICENSES"
   ],
   "engines": {
-    "node": ">=20"
+    "node": "24.x"
   },
   "scripts": {
     "build": "rm -rf dist && tsc -p tsconfig.build.json && chmod +x dist/stdio.js",
