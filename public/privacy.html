@@ -1,0 +1,81 @@
+<!doctype html>
+<!-- DRAFT: prepared without legal review on 2026-10-20. Must be reviewed by a qualified lawyer (Polish/EU law) before being relied on. Fill all [BRACKETED] placeholders. -->
+<html lang="en"><head><meta charset="utf-8"><title>Privacy Policy - edgar-entity-mcp</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px">
+<p><small>Last updated: 2026-10-20</small></p>
+<h1>Privacy Policy</h1>
+<p><small><a href="/">edgar-entity-mcp</a> · <a href="/terms.html">Terms</a> · <a href="/aup.html">Acceptable Use</a> · <a href="/privacy.html">Privacy</a> · <a href="/abuse.html">Contact &amp; Abuse</a></small></p>
+<p>This Privacy Policy explains how personal data is processed in connection with the hosted edgar-entity-mcp service (the "Service"). It covers two groups of people:</p>
+<ul>
+<li><strong>A. API users</strong>: people and organizations that call the Service directly or through an AI agent; and</li>
+<li><strong>B. People named in public records</strong>: individuals who appear in the SEC and state registry data that the Service returns.</li>
+</ul>
+<p>If you run the open-source npm package or the code yourself, your requests go directly from your machine to the SEC and state portals. We do not receive them, and this policy does not apply to that use.</p>
+
+<h2>Controller</h2>
+<p>The controller is [OPERATOR LEGAL NAME], [POSTAL ADDRESS], Poland. Email: <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a>. We have not appointed a data protection officer.</p>
+
+<h2>A. API users</h2>
+<h3>What we process</h3>
+<ul>
+<li><strong>Request contents.</strong> The tool you call and its arguments, such as a company name, ticker, CIK or business name. These are processed to answer your request. Our application does not write tool arguments to its usage logs. However, the upstream URLs built from your arguments, such as a registry search for a business name, are used as cache keys. Those keys and the cached responses are kept for the cache period listed below.</li>
+<li><strong>Usage logs.</strong> When usage logging is enabled, each tool call writes one log line with: timestamp, tool name, transport, success or failure and error code, duration, approximate response size, and, if you used an API key, only the first 6 characters of the key. These lines go to our hosting provider's function logs. [CONFIRM WHETHER USAGE_LOG IS ENABLED IN PRODUCTION]</li>
+<li><strong>API keys.</strong> If API keys are introduced, we process the key to authenticate your requests, plus the account and billing details for any paid plan. [UPDATE WHEN ACCOUNTS/BILLING EXIST]</li>
+<li><strong>Technical and network data.</strong> Our hosting provider, Vercel, processes your IP address, request headers (such as User-Agent), request timestamps, request paths and similar connection data to deliver the Service, protect it (for example firewall, DDoS and abuse protection) and keep platform logs. Our application code does not itself store your IP address.</li>
+</ul>
+<p>The Service does not use cookies, analytics or advertising trackers. This website is a static page.</p>
+
+<h3>Purposes and legal basis</h3>
+<p>We process this data to operate and secure the Service, enforce rate limits and our <a href="/aup.html">Acceptable Use Policy</a>, debug errors, understand aggregate usage, and plan capacity and future pricing. The legal basis is our legitimate interest in providing a reliable, secure and abuse-free service (Art. 6(1)(f) GDPR). Where you have a paid plan, the basis is performance of a contract (Art. 6(1)(b) GDPR) and, for invoices, legal obligations (Art. 6(1)(c) GDPR).</p>
+
+<h3>Retention</h3>
+<ul>
+<li>Usage and function logs: [N] days. [CONFIRM: depends on Vercel plan's log retention and any log drain]</li>
+<li>Vercel platform and network logs, including IP addresses: per Vercel's retention, [N] days.</li>
+<li>Cache entries: between 10 minutes and 30 days depending on data type. State registry searches are cached for 1 hour, SEC company data for 10 minutes to 24 hours, and immutable SEC filing documents for up to 30 days. Short-lived counters used for rate limiting expire after a few seconds.</li>
+</ul>
+
+<h3>Processors and recipients</h3>
+<ul>
+<li><strong>Vercel Inc.</strong> (USA): hosting, serverless functions, network, logs. Functions run in region [VERCEL FUNCTION REGION, e.g. iad1 / Washington, D.C., USA].</li>
+<li><strong>Upstash, Inc.</strong>: Redis cache and rate-limit counters, provisioned through Vercel. Database region: [UPSTASH REGION, e.g. us-east-1].</li>
+<li><strong>Upstream sources</strong> (the SEC and state portals operated on Socrata / Tyler Technologies) receive the queries needed to answer your request, such as a company or business name. They are sent from our servers, not from your IP address.</li>
+</ul>
+<p>We do not sell your personal data. We may disclose data where required by law or to protect the Service and others from abuse.</p>
+
+<h3>International transfers</h3>
+<p>Our processors are based in, or process data in, the United States. Transfers outside the EEA rely on [CONFIRM: the EU-U.S. Data Privacy Framework where the recipient is certified, and/or the European Commission's Standard Contractual Clauses in the processors' data processing agreements]. You can ask us for more information.</p>
+
+<h2>B. People named in public records</h2>
+<p>This section is also our information notice under Art. 14 GDPR for personal data that we did not collect from you directly.</p>
+<h3>Sources</h3>
+<ul>
+<li>U.S. SEC EDGAR (<code>www.sec.gov</code>, <code>data.sec.gov</code>): company filings and Form 3/4/5 insider reports.</li>
+<li>State business registries published as open data: New York Department of State (data.ny.gov), Colorado Department of State (data.colorado.gov), Oregon Secretary of State (data.oregon.gov), Connecticut Secretary of the State (data.ct.gov) and Pennsylvania Department of State (data.pa.gov).</li>
+</ul>
+<h3>Categories of personal data</h3>
+<ul>
+<li>From SEC filings: names of insiders (officers, directors, 10% owners), their roles and relationships to the issuer, reported transactions and holdings, and any personal information that filers include in filing documents (for example executive names and biographies).</li>
+<li>From state registries: names and addresses of registered agents and of persons designated for service of process, and business, principal and mailing addresses. For small businesses these may be private addresses. Pennsylvania officer names are dropped by the Service. Some registries hold additional names that the Service does not return.</li>
+</ul>
+<p>We do not intentionally process special categories of personal data (Art. 9 GDPR).</p>
+<h3>How the data is processed</h3>
+<p>The Service does not maintain its own database of these records. It fetches data from the official source when a user asks, reformats it, returns it to that user with a link to the source, and caches the response temporarily (see Retention above, generally up to 1 hour for registry results and up to 30 days for SEC filing documents).</p>
+<h3>Purposes and legal basis</h3>
+<p>We provide access to official public records for company research, due diligence, journalism and similar purposes. The legal basis is legitimate interests (Art. 6(1)(f) GDPR): ours, and those of our users and the public, in transparent and convenient access to information that the law requires to be public. Our safeguards include returning entity-level fields only, omitting some personal fields, prohibiting harassment, doxxing and FCRA-type use in our <a href="/aup.html">Acceptable Use Policy</a>, short cache periods, and handling objection requests as described below.</p>
+<h3>Recipients</h3>
+<p>Users of the Service who query the relevant company or entity, and our processors listed above.</p>
+<h3>Notice</h3>
+<p>We cannot identify or contact the individuals in these records without collecting more data about them. Contacting them individually would therefore be impossible or require disproportionate effort (Art. 14(5)(b) GDPR). We make this information public on this page instead.</p>
+<h3>Your rights, objection and suppression</h3>
+<p>You have the right to object to this processing at any time on grounds relating to your particular situation (Art. 21 GDPR), and to request access, rectification, erasure or restriction. Email <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a> with the subject "Data subject request". Include the state or SEC source, the entity or filing concerned, and the data you want removed or corrected. We may ask for information to verify your request. If your objection is upheld, we will clear related cache entries and, where technically feasible, suppress the relevant records from the Service's responses. Note that we cannot change the official source records. Corrections there must be made with the SEC, the filer or the relevant state agency.</p>
+
+<h2>Your rights (all groups)</h2>
+<p>Under the GDPR you have the right to access your personal data, have it rectified or erased, restrict its processing, object to processing based on legitimate interests, and, where applicable, receive it in a portable format. To exercise these rights, email <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a>. We will reply within one month, which may be extended as permitted by law. Note that we usually cannot link usage-log entries to a specific person.</p>
+<p>You also have the right to lodge a complaint with a supervisory authority. In Poland this is the President of the Personal Data Protection Office (Prezes Urzędu Ochrony Danych Osobowych, UODO), ul. Stawki 2, 00-193 Warszawa, <a href="https://uodo.gov.pl">uodo.gov.pl</a>. You can also complain to the authority in your EU country of residence or work.</p>
+
+<h2>Changes</h2>
+<p>We may update this policy. The "Last updated" date at the top shows the current version.</p>
+<p><a href="https://github.com/pgeneralpl/edgar-entity-mcp">Source on GitHub</a> · MIT</p>
+</body></html>
