@@ -2,7 +2,7 @@
   "serverInfo": {
     "name": "edgar-entity-mcp",
     "title": "EDGAR + Entity Research",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "websiteUrl": "https://github.com/pgeneralpl/edgar-entity-mcp"
   },
   "remotes": [
@@ -121,14 +121,15 @@
     {
       "name": "get_filing_document",
       "title": "Read a filing document",
-      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
+      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
           "url": {
-            "description": "Document URL on www.sec.gov/Archives",
+            "description": "Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings)",
             "type": "string",
+            "maxLength": 500,
             "format": "uri"
           },
           "company": {
@@ -139,7 +140,8 @@
           },
           "accession": {
             "description": "Accession number, e.g. 0000320193-24-000123",
-            "type": "string"
+            "type": "string",
+            "maxLength": 30
           },
           "section": {
             "description": "Item id to extract, e.g. '1A', '7', 'Item 7A'",
@@ -156,7 +158,7 @@
             "default": 0,
             "type": "integer",
             "minimum": 0,
-            "maximum": 9007199254740991
+            "maximum": 20000000
           }
         }
       }
@@ -362,10 +364,10 @@
           },
           "limit": {
             "default": 10,
-            "description": "Number of most recent Form 4 filings to parse",
+            "description": "Number of most recent Form 4 filings to parse (max 20; each is one SEC request)",
             "type": "integer",
             "minimum": 1,
-            "maximum": 40
+            "maximum": 20
           },
           "include_amendments": {
             "default": true,
@@ -393,7 +395,7 @@
           },
           "include_footnotes": {
             "default": false,
-            "description": "Include footnote text (10b5-1 plan details, price ranges)",
+            "description": "Include footnote and remarks text (10b5-1 plan details, price ranges); filer-written, untrusted",
             "type": "boolean"
           }
         },
@@ -405,7 +407,7 @@
     {
       "name": "lookup_business_entity",
       "title": "State business-entity registry lookup",
-      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available, and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.",
+      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (individual agents withheld unless include_agent_details=true), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -424,7 +426,7 @@
           },
           "states": {
             "description": "Default: all supported states",
-            "maxItems": 10,
+            "maxItems": 5,
             "type": "array",
             "items": {
               "type": "string",
@@ -456,7 +458,12 @@
             "description": "Max results per state",
             "type": "integer",
             "minimum": 1,
-            "maximum": 50
+            "maximum": 25
+          },
+          "include_agent_details": {
+            "default": false,
+            "description": "Include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Requires an API key on the hosted server. Default false: only organizational agents are shown.",
+            "type": "boolean"
           }
         }
       }

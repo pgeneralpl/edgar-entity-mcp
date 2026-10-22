@@ -171,5 +171,5 @@ export async function resolveCompany(input: string): Promise<ResolvedCompany> {
         candidates: matches.map((m) => ({ cik: m.cik, name: m.name, tickers: m.tickers })),
       });
     return { cik: top.cik, name: top.name, tickers: top.tickers };
-  });
+  }, { tier: "memory" }); // arbitrary user strings: never create Redis keys for them
 }

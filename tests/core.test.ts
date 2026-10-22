@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryCache, TieredCache, setCache, cached } from "../src/core/cache.js";
 import { RateLimiter } from "../src/core/rateLimiter.js";
-import { fetchRaw, assertSecUrl } from "../src/core/http.js";
+import { fetchRaw, assertSecUrl, resetLimiters } from "../src/core/http.js";
 import { loadConfig, resetConfig } from "../src/config.js";
 import { normalizePeriod } from "../src/sec/xbrl.js";
 import { selectConceptFacts } from "../src/sec/xbrl.js";
@@ -11,6 +11,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   resetConfig(undefined);
   setCache(undefined);
+  resetLimiters();
 });
 
 describe("cache", () => {
@@ -65,12 +66,15 @@ describe("http", () => {
     expect(() => assertSecUrl("https://evil.example.com/a")).toThrow(/Only https/);
     expect(() => assertSecUrl("http://www.sec.gov/a")).toThrow();
     expect(assertSecUrl("https://www.sec.gov/Archives/x").hostname).toBe("www.sec.gov");
+    expect(assertSecUrl("https://www.sec.gov/Archives/x?bust=1#f").toString()).toBe("https://www.sec.gov/Archives/x");
+    expect(() => assertSecUrl("https://efts.sec.gov/LATEST/search-index?q=x")).toThrow();
   });
   it("config defaults", () => {
     const c = loadConfig({});
-    expect(c.secMaxRps).toBe(8);
+    expect(c.secMaxRps).toBe(6);
     expect(c.secUserAgentIsDefault).toBe(true);
-    expect(loadConfig({ SEC_MAX_RPS: "50" }).secMaxRps).toBe(9);
+    expect(c.secUserAgentValid).toBe(false);
+    expect(loadConfig({ SEC_MAX_RPS: "50" }).secMaxRps).toBe(8);
     expect(loadConfig({ MCP_API_KEYS: "a, b" }).apiKeys).toEqual(["a", "b"]);
   });
 });
@@ -103,5 +107,13 @@ describe("filing filters", () => {
     expect(matchesFilter(f, { forms: ["10-K"] })).toBe(true);
     expect(matchesFilter(f, { forms: ["10-K"], includeAmendments: false })).toBe(false);
     expect(matchesFilter(f, { dateFrom: "2024-02-01" })).toBe(false);
+  });
+});
+
+describe("patched Node.js detection (2026-10-21 security release)", () => {
+  it("accepts only patched 22/24/26 releases", async () => {
+    const { isPatchedNode } = await import("../src/core/nodeVersion.js");
+    for (const v of ["22.23.4", "22.24.0", "24.22.1", "v24.23.0", "26.12.1", "27.0.0"]) expect(isPatchedNode(v)).toBe(true);
+    for (const v of ["20.19.2", "20.99.0", "22.23.3", "22.9.9", "24.22.0", "24.9.9", "25.9.0", "26.12.0"]) expect(isPatchedNode(v)).toBe(false);
   });
 });

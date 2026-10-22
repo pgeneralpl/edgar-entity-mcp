@@ -1,6 +1,8 @@
 import { LRUCache } from "lru-cache";
+import { createHash } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { config } from "../config.js";
+import { markRedisDegraded, redisDegraded } from "./degraded.js";
 
 /**
  * Pluggable string cache. Values are opaque strings (usually JSON).
@@ -34,6 +36,14 @@ export class MemoryCache implements Cache {
   }
 }
 
+/**
+ * Redis key for a cache entry: the logical key (which contains upstream URLs and therefore tool
+ * arguments such as searched names) is hashed, so Redis key names never reveal what was asked.
+ */
+export function redisCacheKey(key: string): string {
+  return `${config().cachePrefix}c:${createHash("sha256").update(key).digest("hex").slice(0, 40)}`;
+}
+
 export class UpstashCache implements Cache {
   readonly kind = "upstash";
   constructor(
@@ -41,19 +51,21 @@ export class UpstashCache implements Cache {
     private maxValueBytes: number,
   ) {}
   async get(key: string) {
+    if (redisDegraded()) return undefined; // save commands / latency while Redis is down or over plan
     try {
-      const v = await this.redis.get<string>(key);
+      const v = await this.redis.get<string>(redisCacheKey(key));
       return v ?? undefined;
-    } catch {
+    } catch (e) {
+      markRedisDegraded(e);
       return undefined; // cache failures must never break tools
     }
   }
   async set(key: string, value: string, ttlSeconds: number) {
-    if (value.length > this.maxValueBytes) return;
+    if (value.length > this.maxValueBytes || redisDegraded()) return;
     try {
-      await this.redis.set(key, value, { ex: Math.max(1, Math.round(ttlSeconds)) });
-    } catch {
-      /* ignore */
+      await this.redis.set(redisCacheKey(key), value, { ex: Math.max(1, Math.round(ttlSeconds)) });
+    } catch (e) {
+      markRedisDegraded(e);
     }
   }
 }
@@ -80,6 +92,7 @@ export class TieredCache implements Cache {
 }
 
 let instance: Cache | undefined;
+let memoryInstance: Cache | undefined;
 let redisClient: Redis | undefined;
 
 export function getRedis(): Redis | undefined {
@@ -89,22 +102,34 @@ export function getRedis(): Redis | undefined {
   return redisClient;
 }
 
+/** Process-local cache (never Redis). */
+export function getMemoryCache(): Cache {
+  if (!memoryInstance) memoryInstance = new MemoryCache(config().memoryCacheMb * 1024 * 1024);
+  return memoryInstance;
+}
+
 export function getCache(): Cache {
   if (instance) return instance;
   const c = config();
-  const mem = new MemoryCache(c.memoryCacheMb * 1024 * 1024);
+  const mem = getMemoryCache();
   const redis = getRedis();
   instance = redis ? new TieredCache(mem, new UpstashCache(redis, c.redisMaxValueBytes)) : mem;
   return instance;
 }
 
-export function setCache(c: Cache | undefined): void {
+export function setCache(c: Cache | undefined, memory?: Cache): void {
   instance = c;
+  memoryInstance = memory ?? (c === undefined ? undefined : memoryInstance);
+}
+
+export interface CacheOptions {
+  /** "shared" (default) = memory + Redis when configured; "memory" = this process only. */
+  tier?: "shared" | "memory";
 }
 
 /** Read-through helper for JSON-serialisable values. */
-export async function cached<T>(key: string, ttlSeconds: number, produce: () => Promise<T>): Promise<T> {
-  const cache = getCache();
+export async function cached<T>(key: string, ttlSeconds: number, produce: () => Promise<T>, opts: CacheOptions = {}): Promise<T> {
+  const cache = opts.tier === "memory" ? getMemoryCache() : getCache();
   const full = config().cachePrefix + key;
   const hit = await cache.get(full);
   if (hit !== undefined) {
@@ -128,6 +153,7 @@ export const TTL = {
   companyFacts: 6 * 3600,
   companyConcept: 6 * 3600,
   frames: 12 * 3600,
-  filingDoc: 30 * 24 * 3600, // filed documents are immutable
+  filingDoc: 30 * 24 * 3600, // filed documents are immutable (memory tier only for raw bodies)
+  filingDocShared: 7 * 24 * 3600, // processed/trimmed text and parsed Form 4s in Redis
   stateSearch: 3600,
 } as const;

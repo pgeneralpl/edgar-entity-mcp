@@ -7,14 +7,21 @@ jobs:
   check:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        node: [20, 22]
+        # Patched lines only (Node.js security release 2026-10-21; 20.x is EOL).
+        # check-latest pulls the newest patch instead of a possibly stale runner cache;
+        # the "Assert patched Node" step fails the job if an older patch is picked up.
+        node: ["22.x", "24.x"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
+          check-latest: true
           cache: npm
+      - name: Assert patched Node
+        run: node scripts/check-node-version.mjs
       - run: npm ci
       - run: npm run check
   smoke:
@@ -40,7 +47,8 @@ jobs:
       - uses: actions/setup-node@v4
         if: steps.ua.outputs.has_ua == 'true'
         with:
-          node-version: 22
+          node-version-file: .nvmrc
+          check-latest: true
           cache: npm
       - run: npm ci
         if: steps.ua.outputs.has_ua == 'true'

@@ -199,7 +199,7 @@ export async function listFilings(
     if (matched.length >= need) break;
     if (flt.dateFrom && f.filingTo < flt.dateFrom) continue;
     if (flt.dateTo && f.filingFrom > flt.dateTo) continue;
-    if (pages >= 5) break; // safety bound
+    if (pages >= LIST_MAX_HISTORY_PAGES) break; // safety bound (cost weights in core/quota.ts assume this)
     const page = await getHistoryPage(f.name);
     pages++;
     consume(rowsFromColumns(cik, page));
@@ -214,12 +214,25 @@ export async function listFilings(
   };
 }
 
-/** Find a single filing by accession (searching recent + history). */
+/** Max older-history pages scanned by findFiling (each is one SEC request). */
+export const FIND_FILING_MAX_PAGES = 4;
+/** Max older-history pages scanned when listing filings. */
+export const LIST_MAX_HISTORY_PAGES = 4;
+
+/** Find a single filing by accession (searching recent + up to FIND_FILING_MAX_PAGES history pages). */
 export async function findFiling(cik: string | number, accession: string): Promise<FilingRow | null> {
   const s = await getSubmissions(cik);
   const hit = rowsFromColumns(cik, s.filings.recent).find((r) => r.accession === accession);
   if (hit) return hit;
-  for (const f of s.filings.files ?? []) {
+  // Accession numbers embed the filing year (NNNNNNNNNN-YY-NNNNNN); scan pages covering it first.
+  const yy = Number(accession.split("-")[1]);
+  const year = Number.isFinite(yy) ? (yy > 90 ? 1900 + yy : 2000 + yy) : undefined;
+  const files = [...(s.filings.files ?? [])].sort((a, b) => {
+    if (!year) return 0;
+    const covers = (f: { filingFrom: string; filingTo: string }) => Number(f.filingFrom.slice(0, 4)) <= year + 1 && Number(f.filingTo.slice(0, 4)) >= year - 1;
+    return Number(covers(b)) - Number(covers(a));
+  });
+  for (const f of files.slice(0, FIND_FILING_MAX_PAGES)) {
     const page = await getHistoryPage(f.name);
     const h = rowsFromColumns(cik, page).find((r) => r.accession === accession);
     if (h) return h;

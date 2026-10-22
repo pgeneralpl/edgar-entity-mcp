@@ -7,7 +7,7 @@ Repo: https://github.com/pgeneralpl/edgar-entity-mcp · Live endpoint: `https://
 1. ~~`gh repo create pgeneralpl/edgar-entity-mcp --public --source . --push`~~ (done)
 2. ~~Set owner `pgeneralpl` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file~~ (done)
 3. ~~`npm publish --access public`~~ (done: https://www.npmjs.com/package/edgar-entity-mcp, v0.1.0, published 2026-10-20 with a one-off bypass-2FA token that was revoked right after). The account still has no 2FA; add a passkey/security key at https://www.npmjs.com/settings/pgeneralpl/tfa.
-4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`). Still open: accept the Upstash marketplace terms in the Vercel dashboard, then add the free Upstash Redis store (`vercel integration add upstash/upstash-kv --plan free -m primaryRegion=iad1 -m autoUpgrade=false`) so the cache and rate budget are shared; and install the Vercel GitHub App on the repo for push-to-deploy.
+4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`; GitHub auto-deploy and the free Upstash Redis store are connected). Before launch: merge the security-hardening PR (quotas, fail-closed limiter), set `HEALTH_SECRET` and `IP_HASH_SALT`, enable eviction + usage alerts in the Upstash console, and register a `SOCRATA_APP_TOKEN`.
 5. Future releases: bump the version in `package.json` and `server.json` (both places), commit, then `gh release create vX.Y.Z`. `.github/workflows/release.yml` publishes to npm via Trusted Publishing and to the MCP Registry via GitHub OIDC (after the one-time `npm trust github …` setup noted in that file). **Still open:** the npm Trusted Publisher must be added in the web UI (https://www.npmjs.com/package/edgar-entity-mcp/access → Trusted Publisher → GitHub Actions: owner `pgeneralpl`, repo `edgar-entity-mcp`, workflow `release.yml`); the CLI (`npm trust`) is refused for accounts/tokens without 2FA.
 6. ~~MCP Registry (first release)~~ (done: `io.github.pgeneralpl/edgar-entity-mcp` 0.1.0, active).
 7. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → `https://edgar-entity-mcp.vercel.app/mcp`. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
@@ -27,7 +27,7 @@ edgar-entity-mcp gives agents one tool belt for researching US companies using o
 - **Insider trades**: Form 4 parsed into plain English, with an open-market buys vs. sales summary.
 - **Business entities**: Secretary of State registry search for NY, CO, OR, CT and PA. Returns status, type, formation date, jurisdiction, addresses and registered agent.
 
-Responses are compact JSON with source URLs. The server respects SEC fair-access rules (User-Agent, ~8 req/s, retries) and caches with Upstash or in memory. It runs as stdio (`npx -y edgar-entity-mcp`) or remotely over Streamable HTTP. MIT licensed.
+Responses are compact JSON with source URLs. The server respects SEC fair-access rules (User-Agent, a fleet-wide 6 req/s token bucket that fails closed, retries) and caches with Upstash or in memory. It runs as stdio (`npx -y edgar-entity-mcp`) or remotely over Streamable HTTP. MIT licensed.
 
 **Tags:** finance, sec, edgar, xbrl, research, company-data, kyc, due-diligence
 
@@ -71,7 +71,7 @@ The data is free, official and commercially usable. 🧵
 
 4/ State registries: NY, CO, OR, CT and PA through their open-data APIs. I checked each license for commercial use and documented the result (public domain or OPEN-NY terms). Delaware has no open data, sadly.
 
-5/ It plays nice with SEC: declared User-Agent, a global ~8 req/s limiter, backoff on 429/503, and caching (Upstash or in-memory). Responses are compact JSON with source URLs, so agents cite instead of hallucinating.
+5/ It plays nice with SEC: declared User-Agent, a fleet-wide 6 req/s limiter, backoff on 429/503, per-client quotas, and caching (Upstash or in-memory). Responses are compact JSON with source URLs, so agents cite instead of hallucinating.
 
 6/ Works in Claude Desktop, Cursor, Claude Code and VS Code via stdio, or remotely over Streamable HTTP: https://edgar-entity-mcp.vercel.app/mcp. MIT licensed.
 
@@ -97,6 +97,8 @@ So I built **edgar-entity-mcp**, an MCP server that connects agents to official 
 **Business model (not live yet):**
 - Free: the npm package (stdio) and a keyless hosted endpoint with caching
 - Pro: API key, higher rate limits, bulk exports, more states
+
+(Note: Vercel Hobby is for non-commercial use; move the project to Vercel Pro before charging.)
 - Team: webhooks for new filings and insider trades on a watchlist
 
 The code already has the hook points: API-key verification on the HTTP endpoint and before/after call hooks for metering.

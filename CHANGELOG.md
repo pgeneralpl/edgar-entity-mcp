@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.1.0 (unreleased)
+## 0.2.0 (unreleased)
+
+- **Node.js runtime (security release 2026-10-21, CVE-2026-111497 Brotli decoder OOB write, TLS hostname bypasses, undici):** `engines.node` `>=20` → `24.x` (Vercel runtime pin); `.nvmrc` / `.node-version` 24.22.1; CI matrix 22.x + 24.x with `check-latest` and a patched-version assertion (`scripts/check-node-version.mjs`); release workflow on `.nvmrc`. Stdio users need Node.js ≥ 22.23.4 or ≥ 24.22.1; the CLI warns on stderr otherwise. Node.js 20 (EOL) is no longer supported.
+
+Security hardening (audit 2026-10-20).
+
+- **Quotas (C1):** cost-weighted per-IP and per-API-key limits on the HTTP endpoint (anonymous 30 units/min and 300/day per IP plus 1,500/day per /24 network and 2,000/day for all anonymous callers; free key 120/min, 2,000/day), with `RATE_LIMITED` errors carrying `retry_after_seconds` and a key-request hint. Self-verifying API keys (`scripts/create-key.ts`, `scripts/delete-key.ts`, `REVOKED_KEY_IDS`). JSON-RPC batches rejected; insider fan-out capped at 20 filings, entity lookups at 5 states.
+- **SEC limiter (C2):** two-stage limiter (local spacing + atomic Upstash token bucket, default 6 rps, max 8) that fails closed; also applied to state portals. Raw documents are no longer stored in Redis; cache keys are normalized.
+- **SSRF / size (H1, L2):** strict EDGAR Archives URL validation, 15 MB streaming cap, manual redirects with host re-check.
+- **Privacy (H3):** individual registered agents withheld unless `include_agent_details: true`; suppression list (`scripts/suppress.ts`); NY service-of-process field.
+- **Prompt injection (H4):** filing text wrapped in untrusted-content markers with `untrusted_content: true`; zero-width/bidi characters stripped.
+- **M1–M5, L1–L5:** `SOCRATA_APP_TOKEN` support and less overfetch; `findFiling` capped at 8 pages, failed ticker resolves not cached in Redis; `/health?deep=1` gated by `HEALTH_SECRET`; node server binds 127.0.0.1 with Host/Origin checks; 64 KB body cap; generic client errors with log reference ids; SEC tools refuse to run without a real `SEC_USER_AGENT`.
+- **Data minimisation of rate-limit state:** Redis holds only integer counters with TTL = window (per-minute 70 s; daily per-IP, per-/24 and per-key 25 h); per-tool usage hashes and the 35-day key retention are removed. IP hashes use a daily-rotating salt `HMAC(IP_HASH_SALT, UTC date)`. Cache keys are hashed, so Redis key names never contain URLs or tool arguments. Error logs mask query strings, IPs and emails. The quota backend fails closed after 3 s. `create-key.ts` stores no label, name or contact.
+- **Review follow-up (MCP SEC Security, PR #2):**
+  - *Free-plan safety (B1):* all daily quota counters in one `EVALSHA` (no per-tool `HINCRBY`; billed counts in the re-review entry below); blocks memoised in memory until the window ends (repeat blocked calls: 0 commands); self-verifying API keys `eem_<id>_<HMAC>` (forged/random keys: 0 commands) plus an in-memory limiter on failed key attempts (HTTP 429); degraded mode on Redis errors or plan exhaustion (local in-memory quotas, no Redis cache, SEC at 1 rps per instance) instead of an outage. Command counts asserted in `tests/budget.test.ts`.
+  - *Privacy (B2):* the server refuses to start with Redis configured and `IP_HASH_SALT` missing, the old default or shorter than 32 chars; key records hold no owner name or contact; `scripts/delete-key.ts` deletes a key and its counters; per-key counters 25 h, minute counters 70 s; no `u:` usage data.
+  - *Fair use (H-a, L-b):* global daily cap for all anonymous callers (2,000 units); 2 of 6 SEC req/s reserved for API-key callers; max 4 concurrent upstream fetches per client. Defaults: network cap 3,000 → 1,500, key 5,000 → 2,000 units/day.
+  - *Agent classification (M-a):* names count as organizations only with a legal-form suffix or as a known agent service; everything else (including CO/PA/PC endings) is an individual.
+  - *Agent details (M-b):* `include_agent_details` only for API-key callers; principal/mailing addresses and NY location name withheld when the agent or service-of-process contact is an individual.
+  - *Suppression (M-c):* normalized entity ids; suppressed names matched in entity name, NY location name and addresses; state lookups refused on a cold start when the list cannot be loaded.
+  - *Untrusted text (M-d):* random per-response marker nonce (`untrusted_marker_id`); Unicode tag characters stripped; entity names/addresses, Form 4 names/remarks/footnotes and XBRL labels/descriptions cleaned and listed in `untrusted_fields`.
+  - *L-a, L-c, L-d:* client IP from `x-vercel-forwarded-for`, then XFF, then `x-real-ip`; costs `get_filing_document` 4/10, `get_insider_trades` 6 + limit (max 26), `list_filings` 6 with paging; SEC token bucket refills smoothly (1 token / 167 ms, burst 2).
+- **Re-review follow-up (MCP SEC Security, d0e4cb4):**
+  - *B1:* the last known value of every daily counter (own, /24, global) is memoised until UTC midnight; a call whose cost exceeds the remaining allowance is refused locally at 0 commands (fixes "299/300 + cost-10 spam = 2 commands per call").
+  - *H1:* billed-command counts documented honestly (script-internal commands included): anonymous allowed quota check 4, keyed 2, refused-by-memo 0; whole warm call 4, cold 1-SEC-request call 10. Per-minute counters moved to memory (fewer counters); `EXPIRE` only when `INCRBY` creates the key; no `MGET`.
+  - *H2:* reserve-then-refund (actual cost = upstream requests, min 1; refunds folded into the next `INCRBY`, 0 extra commands); per-/24 cap ≤ 10% of the global anonymous budget; soft global cap with a 10-unit per-IP trickle up to a hard ceiling (1.5×). New defaults sized for the free plan: anonymous 60/IP, 60 per /24, 600 soft / 900 hard global, key 500 units/day.
+  - *M1:* degraded mode: anonymous callers cache-only; API-key callers at `DEGRADED_SEC_RPS` (default 0.2/s per instance, `0` = refuse).
+  - *M2:* `REVOKED_KEY_IDS` denylist; keys accepted unverified in degraded mode are not trusted for `include_agent_details`.
+  - *M3:* `API_KEY_SECRET` (≥32 chars, ≠ `IP_HASH_SALT`) required with Redis; no longer derived from `IP_HASH_SALT`.
+  - *Low:* TTL set atomically when a counter is created; only `max requests limit` is classified as plan exhaustion; LRU for memoised state; variation selectors stripped; suppressed names inside entity names withhold the name.
+  - Docs: "Required configuration before resuming the hosted deployment".
+- **Breaking:** `IP_HASH_SALT` and `API_KEY_SECRET` (≥32 chars) are required when Redis is configured. API keys minted by earlier 0.2.0 previews (`eem_<32 chars>`) are no longer valid. Setting `MCP_API_KEYS` no longer makes keys mandatory; use `MCP_REQUIRE_API_KEY=1`. `SEC_USER_AGENT` is now required for SEC tools. Default `SEC_MAX_RPS` 8 → 6.
+
+## 0.1.0
 
 - 10 tools: search_company, get_company_profile, list_filings, get_filing_document, get_financials, get_xbrl_concept, compare_companies, get_insider_trades, lookup_business_entity, list_supported_states
 - `company_research_brief` prompt and `edgar-entity://data-sources` resource

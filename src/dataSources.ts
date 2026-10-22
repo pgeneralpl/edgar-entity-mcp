@@ -11,7 +11,7 @@ function build(): string {
   lines.push(
     "- Endpoints: `www.sec.gov/files/company_tickers_exchange.json`, `data.sec.gov/submissions/`, `data.sec.gov/api/xbrl/{companyfacts,companyconcept,frames}/`, `www.sec.gov/Archives/edgar/data/`.",
     "- Terms: U.S. federal government public information. SEC: \"Information presented on www.sec.gov is considered public information and may be copied or further distributed by users of the web site without the SEC's permission\" (cite the SEC as source). https://www.sec.gov/about/privacy-information#dissemination",
-    "- Fair access: max 10 requests/second and a declared User-Agent with contact info. https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data . This server throttles to ~8 req/s (SEC_MAX_RPS) and always sends SEC_USER_AGENT.",
+    "- Fair access: max 10 requests/second and a declared User-Agent with contact info. https://www.sec.gov/search-filings/edgar-search-assistance/accessing-edgar-data . This server throttles to 6 req/s by default (SEC_MAX_RPS, max 8; fleet-wide token bucket when Redis is configured, failing closed), always sends SEC_USER_AGENT, and refuses SEC calls when SEC_USER_AGENT is unset.",
     "- Filings themselves are documents authored by the filers; quoting for research is customary, but republishing large verbatim excerpts commercially is the operator's responsibility.",
     "",
   );
@@ -25,7 +25,15 @@ function build(): string {
   lines.push("Source: https://data.colorado.gov/terms (\"Applications using data supplied by this site must include the following disclaimers on their sites\").", "");
   lines.push("### Personal data note", "");
   lines.push(
-    "Registries include names/addresses of registered agents and, in some states, individuals. This server returns entity-level fields only (PA officer names are dropped). Operators should honor state privacy notices and not use the data for prohibited purposes (e.g. FCRA-regulated decisions).",
+    "State registries are public records, but some fields identify natural persons. What this server returns:",
+    "",
+    "- **Registered agents / service-of-process contacts**: commercial and organizational agents (e.g. registered-agent companies) are returned. Agents that appear to be individuals (CO and OR mark person-name fields; NY is classified heuristically) are returned as `{ kind: \"individual\", withheld: true }` unless the caller passes `include_agent_details: true`.",
+    "- **Entity addresses** (principal/mailing) are returned as published; for very small businesses these can be a person's home address.",
+    "- **PA officer names** are dropped (the source is row-per-officer; rows are de-duplicated without names).",
+    "- **SEC Form 4 insiders**: get_insider_trades returns reporting owners' names, roles and transactions. These are statutory public disclosures (Section 16, Securities Exchange Act) and are needed for the tool's purpose.",
+    "- **Erasure / objection requests**: operators can suppress an entity's personal fields (`entity:<STATE>:<id>`) or an agent name (`agent:<name>`) via the built-in list (src/states/suppression-list.ts), a JSON file (SUPPRESSION_FILE) or the Redis set managed with `scripts/suppress.ts`. Suppressed data is never returned, even with include_agent_details.",
+    "- **Hosted rate-limit state**: only integer counters keyed by a daily-rotating HMAC of the client IP (or the public API key id), with TTL equal to the enforced window (25 h per day; per-minute limits are in memory only). API key records hold only a creation date and optional limits (no owner name or contact) and can be deleted with scripts/delete-key.ts. No raw IPs, user agents, paths or tool arguments are stored in Redis or written to logs. Individual registered agents, and related entity addresses, are returned only to API-key callers who ask for them. See README > What the hosted server stores.",
+    "- Do not use registry data for FCRA-regulated decisions (credit, employment, tenancy, insurance) or other purposes prohibited by the source portals.",
     "",
   );
   lines.push("### Investigated but not enabled", "");

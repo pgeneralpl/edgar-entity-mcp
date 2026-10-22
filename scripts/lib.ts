@@ -21,6 +21,6 @@ export function failed(): number {
   return failures;
 }
 export const snip = (v: unknown, n = 600) => {
-  const s = JSON.stringify(v);
+  const s = JSON.stringify(v) ?? String(v);
   return s.length > n ? s.slice(0, n) + "…" : s;
 };

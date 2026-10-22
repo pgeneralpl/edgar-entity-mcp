@@ -9,6 +9,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { call, check, failed, snip, type Json } from "./lib.js";
 
+if (!process.env.SEC_USER_AGENT) {
+  console.error('Set SEC_USER_AGENT="<Your Name> <email>" to run the live smoke test (the SEC requires it).');
+  process.exit(2);
+}
 const out = "smoke-output";
 mkdirSync(out, { recursive: true });
 const save = (name: string, v: unknown) => writeFileSync(`${out}/${name}.json`, JSON.stringify(v, null, 2));
@@ -16,7 +20,7 @@ const save = (name: string, v: unknown) => writeFileSync(`${out}/${name}.json`, 
 const transport = new StdioClientTransport({
   command: process.execPath,
   args: ["dist/stdio.js"],
-  env: { ...process.env, SEC_USER_AGENT: process.env.SEC_USER_AGENT ?? "edgar-entity-mcp smoke-test contact@example.com" } as Record<string, string>,
+  env: { ...process.env } as Record<string, string>,
   stderr: "pipe",
 });
 const client = new Client({ name: "smoke", version: "0.0.0" });
