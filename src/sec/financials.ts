@@ -154,6 +154,7 @@ const QUARTERLY_FORMS = new Set(["10-Q", "10-Q/A", "10-QT"]);
 const dur = (f: Fact) => (f.start ? daysBetween(f.start, f.end) : 0);
 const isAnnualDur = (d: number) => d >= 340 && d <= 390;
 const isQuarterDur = (d: number) => d >= 80 && d <= 100;
+const addDays = (d: string, n: number) => new Date(Date.parse(d) + n * 86_400_000).toISOString().slice(0, 10);
 const near = (a: string | undefined, b: string | undefined, days: number) => !!a && !!b && Math.abs(daysBetween(a, b)) <= days;
 
 function pickUnit(units: Record<string, Fact[]>, kind: UnitKind): string | undefined {
@@ -249,6 +250,11 @@ export function buildPeriods(cf: CompanyFacts, mode: "annual" | "quarterly"): Pe
   return periods;
 }
 
+function latestAnnualEnd(annual: Period[]): string {
+  const a = annual[0];
+  return a ? ` (fiscal year ${a.fy} ended ${a.end})` : "";
+}
+
 function mode1(xs: number[]): number | undefined {
   if (!xs.length) return undefined;
   const c = new Map<number, number>();
@@ -327,9 +333,14 @@ export interface FinancialsResult {
   name: string;
   period_type: "annual" | "quarterly";
   currency?: string;
+  /** fy/fp are the company's fiscal periods (not calendar years). */
+  period_basis: "fiscal";
+  /** MM-DD the latest fiscal year ended on (e.g. "06-30" for Microsoft; 52/53-week years vary by a few days). */
+  fiscal_year_end?: string;
   periods: Record<string, unknown>[];
   tags_used: Record<string, string[]>;
   notes: string[];
+  hint?: string;
   source_url: string;
 }
 
@@ -341,7 +352,10 @@ export function computeFinancials(cf: CompanyFacts, mode: "annual" | "quarterly"
     // Add derived Q4 periods (companies do not file a 10-Q for Q4).
     for (const a of annualPeriods) {
       if (periods.some((q) => near(q.end, a.end, 3))) continue;
-      const q: Period = { fy: a.fy, fp: "Q4", end: a.end, form: a.form, accn: a.accn, filed: a.filed, derived: true };
+      // Q4 starts the day after the fiscal Q3 (the 10-Q ending ~3 months before the year end).
+      const q3 = periods.find((q) => !q.derived && isQuarterDur(daysBetween(q.end, a.end)));
+      const start = q3 ? addDays(q3.end, 1) : undefined;
+      const q: Period = { fy: a.fy, fp: "Q4", end: a.end, start, form: a.form, accn: a.accn, filed: a.filed, derived: true };
       periods.push(q);
       annualByEnd.set(q.end, a);
     }
@@ -409,19 +423,37 @@ export function computeFinancials(cf: CompanyFacts, mode: "annual" | "quarterly"
   });
 
   const notes: string[] = [];
-  if (out.length) notes.push("Raw values as reported (not scaled); EPS per share; free_cash_flow = operating_cash_flow - capex.");
+  if (out.length)
+    notes.push(
+      `Raw values as reported (not scaled); EPS per share; free_cash_flow = operating_cash_flow - capex. fy/fp are fiscal periods${latestAnnualEnd(mode === "annual" ? periods : annualPeriods)} (compare_companies uses calendar periods instead).`,
+    );
   for (const [how, ms] of derivations) notes.push(`Derived (${how}): ${[...ms].join(", ")}`);
   if (mode === "quarterly" && out.some((r) => r.derived_period)) notes.push("Q4 rows (derived_period) = FY minus 9-month YTD for flow metrics; EPS is not derived.");
-  if (!out.length) notes.push("No periods found for this company/mode in XBRL companyfacts.");
+  let hint: string | undefined;
+  if (!out.length) {
+    notes.push("No periods found for this company/mode in XBRL companyfacts.");
+    // e.g. a recent IPO / new registrant that has filed 10-Qs but no 10-K yet (or the reverse).
+    const other = mode === "annual" ? "quarterly" : "annual";
+    const n = buildPeriods(cf, other).length;
+    if (n)
+      hint =
+        mode === "annual"
+          ? `This company has only quarterly (10-Q) XBRL data so far (${n} quarter(s)); call get_financials with period_type: 'quarterly'.`
+          : `This company has no 10-Q quarters in XBRL, only annual data (${n} year(s)); call get_financials with period_type: 'annual'.`;
+  }
+  const latestAnnual = (mode === "annual" ? periods : annualPeriods)[0];
 
   return {
     cik: padCik(cf.cik),
     name: cf.entityName,
     period_type: mode,
+    period_basis: "fiscal",
+    fiscal_year_end: latestAnnual?.end.slice(5),
     currency,
     periods: out,
     tags_used: tagsUsed,
     notes,
+    hint,
     source_url: companyFactsUrl(cf.cik),
   };
 }
