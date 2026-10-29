@@ -6,6 +6,7 @@ import { getUserUsageHooks, setSystemUsageHook, setUsageHooks, stderrUsageLogger
 import { chargeQuota, settleQuota, type Principal, type QuotaStore } from "../core/quota.js";
 import { clientIp, ipPrincipal, keyFailuresExceeded, recordKeyFailure, verifyApiKey } from "../core/apiKeys.js";
 import { logError } from "../core/errors.js";
+import { recordInitialize, recordToolCall } from "../core/stats.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
 
 export interface HttpHandlerOptions {
@@ -66,6 +67,13 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
     },
   });
 
+  // Aggregate usage counters (src/core/stats.ts): local, synchronous; Redis writes are batched in the background.
+  setSystemUsageHook("stats", {
+    afterCall(e) {
+      recordToolCall(e);
+    },
+  });
+
   const base = createMcpHandler((server) => registerAll(server, "http"), {
     serverInfo: { name: PACKAGE_NAME, version: VERSION },
     instructions: SERVER_INSTRUCTIONS,
@@ -80,13 +88,20 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
       return rpcError(503, -32000, "Server misconfigured; refusing to serve. The operator has been notified in the logs.");
     }
     let body: string | undefined;
+    let initClientInfo: unknown;
+    let isInitialize = false;
     if (req.method === "POST") {
       const text = await readBodyCapped(req, c.maxBodyBytes);
       if (text === null) return rpcError(413, -32600, `Request body exceeds ${c.maxBodyBytes} bytes.`);
       body = text;
       try {
-        if (Array.isArray(JSON.parse(text)))
+        const msg: unknown = JSON.parse(text);
+        if (Array.isArray(msg))
           return rpcError(400, -32600, "JSON-RPC batch requests are not supported. Send one JSON-RPC message per HTTP request.");
+        if (msg && typeof msg === "object" && (msg as { method?: unknown }).method === "initialize") {
+          isInitialize = true;
+          initClientInfo = (msg as { params?: { clientInfo?: unknown } }).params?.clientInfo;
+        }
       } catch {
         /* not JSON: let the MCP transport produce its parse error */
       }
@@ -127,6 +142,7 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
       signal: req.signal,
     });
     (forwarded as Request & { auth?: AuthInfo }).auth = auth;
+    if (isInitialize) recordInitialize(principal, initClientInfo);
     return base(forwarded);
   };
 }

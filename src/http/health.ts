@@ -70,7 +70,8 @@ function writeBudgetDetail() {
   };
 }
 
-function secretMatches(given: string | null, secret: string | undefined): boolean {
+/** Constant-time comparison of a presented secret (hash both sides so lengths never leak). */
+export function secretMatches(given: string | null, secret: string | undefined): boolean {
   if (!secret || !given) return false;
   const a = createHash("sha256").update(given).digest();
   const b = createHash("sha256").update(secret).digest();

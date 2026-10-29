@@ -173,6 +173,7 @@ The hosted server's [Privacy Policy](https://edgar-entity-mcp.vercel.app/privacy
 
 - Rate limiting keeps **only integer counters** in Redis, under identifiers hashed with a salt that rotates daily, expiring 25 h after the UTC day they count; per-minute limits stay in process memory.
 - Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries hold public SEC and state data under hashed key names and expire after at most 24 h.
+- Aggregate usage statistics (per-day counts per tool, outcome and error code, allowlisted client-software labels, an approximate unique-client count) are kept for 30 days after each UTC day; no per-client records.
 - Logs (errors, and optional per-call usage lines with a daily-rotating hash) go to Vercel runtime logs under Vercel's plan retention; tool arguments and raw IPs are never logged by this server.
 
 The full Redis key list, TTLs and hashing scheme are in [docs/OPERATIONS.md](docs/OPERATIONS.md#what-the-hosted-server-stores-and-for-how-long).
