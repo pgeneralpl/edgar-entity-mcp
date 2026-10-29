@@ -22,7 +22,7 @@ npx -y edgar-entity-mcp        # stdio MCP server
 
 | Tool | What it does | Source |
 |---|---|---|
-| `search_company` | Ticker/name → CIK matches, fuzzy-ranked (share classes merged) | `company_tickers_exchange.json` |
+| `search_company` | Ticker/name → CIK matches: typo-tolerant, ignores case/punctuation/`&` vs `and`/legal suffixes, knows well-known former names (`Facebook` → META); share classes merged; `did_you_mean` + hint when nothing matches | `company_tickers_exchange.json` (cached; no extra SEC call per query) |
 | `get_company_profile` | Name, tickers, exchanges, SIC + industry, state of incorporation, FYE, EIN, addresses, former names, latest 10-K/10-Q | `data.sec.gov/submissions` |
 | `list_filings` | Filings by form type + date range, with accession, dates, primary-document and index URLs; reads older history pages when needed | `data.sec.gov/submissions` |
 | `get_filing_document` | Primary document converted to clean text (tables kept as rows); 10-K/10-Q **item extraction** (1, 1A, 7, 7A, 8…); `max_chars`/`offset` paging | `www.sec.gov/Archives` |
@@ -30,12 +30,12 @@ npx -y edgar-entity-mcp        # stdio MCP server
 | `get_xbrl_concept` | Full history of any XBRL concept/unit for one company | XBRL `companyconcept` |
 | `compare_companies` | One concept across all filers for a calendar period (rank or filter by tickers) | XBRL `frames` |
 | `get_insider_trades` | Form 4/4A parsed: reporter, role/title, code + plain meaning, shares, price, value, A/D, owned after, derivative details; buy/sell summary | Form 4 XML |
-| `lookup_business_entity` | Search SoS registries by name or entity id; normalized status, type, formation date, jurisdiction, addresses, registered agent | NY/CO/OR/CT/PA open data (Socrata) |
+| `lookup_business_entity` | Search SoS registries by name or entity id; ranked exact > prefix > other (active first), `&`/`and` and suffix spellings matched, `limit`/`offset` pagination with `has_more`/`next_offset`/`total`; normalized status, type, formation date, jurisdiction, addresses, registered agent | NY/CO/OR/CT/PA open data (Socrata) |
 | `list_supported_states` | Coverage, dataset ids, update cadence and license per state | — |
 
 Also included: a `company_research_brief` **prompt** that runs the whole workflow, and an `edgar-entity://data-sources` **resource** (licenses).
 
-Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous name. Errors come back as `{"error":{"code","message","hint"}}` with `isError: true`. Ambiguous names return candidate CIKs.
+Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous name. Errors come back as `{"error":{"code","message","hint"}}` with `isError: true`. Ambiguous names return candidate CIKs; a typo (`Microsfot`) is never resolved silently: it returns `AMBIGUOUS` with the likely candidate, and an unknown name returns `NOT_FOUND` with `did_you_mean`, a pointer to `lookup_business_entity` and an EDGAR company-search link (current and former names, filers without a ticker).
 
 ### Example calls and real outputs (live data, trimmed)
 
@@ -88,11 +88,22 @@ Balance-sheet (instant) concepts need an `I` suffix, e.g. `{"tag":"Assets","peri
   "registered_agent":{"name":"CORPORATION SERVICE COMPANY","address":"1900 W Littleton Blvd, Littleton, CO, 80120"},
   "details_url":"https://www.coloradosos.gov/biz/BusinessEntityDetail.do?masterFileId=20021056790",
   "source_url":"https://data.colorado.gov/resource/4ykn-tg5h.json?entityid=20021056790"}],
- "by_state":{"CO":{"count":1,"query_url":"…"}}}
+ "count":1,"offset":0,"has_more":false,"total":1,
+ "by_state":{"CO":{"count":1,"offset":0,"has_more":false,"total":1,"query_url":"…"}}}
 ```
+
+**`lookup_business_entity`** `{"name":"Tiffany & Co.","states":["NY"],"include_total":true}` (exact spelling variants rank first; `TIFFANY AND COMPANY` matches `Tiffany & Co.`)
+```json
+{"results":[{"state":"NY","entity_id":"22220","name":"TIFFANY AND COMPANY","status":"Active", "…":"…"},
+            {"state":"NY","entity_id":"5329856","name":"TIFFANY 1, INC.","status":"Active", "…":"…"}, "…"],
+ "count":5,"offset":0,"has_more":true,"next_offset":5,"total":489,
+ "by_state":{"NY":{"count":5,"offset":0,"has_more":true,"next_offset":5,"total":489,"active_only_dataset":true,"query_url":"…"}}}
+```
+Pagination is per state (`limit` 1–25 per state, `offset` 0–500; pass `next_offset`). `total` is exact with `include_total: true` (one extra count request per state) and is also filled in once the last page is reached. Oregon lists one row per associated name, so its pages are computed over the first 300 rows (a `note` says when that window is exhausted).
 
 Other quick examples:
 - `search_company {"query":"berkshire"}` → `BERKSHIRE HATHAWAY INC`, CIK `0001067983`, tickers `BRK-B, BRK-A`
+- `search_company {"query":"Microsfot"}` → `MICROSOFT CORP` (score 69, a typo match); `{"query":"facebook"}` → `Meta Platforms, Inc.` with `matched_former_name: "Facebook Inc"`
 - `list_filings {"company":"AAPL","forms":["10-K"],"date_to":"2010-12-31","limit":2}` → the 2010 10-K and 10-K/A, read from older history pages
 - `get_xbrl_concept {"company":"TSLA","tag":"ResearchAndDevelopmentExpense","forms":["10-K"],"framed_only":true}`
 - `lookup_business_entity {"entity_id":"0783036","states":["CT"]}` → THE TRAVELERS COMPANIES, INC. (Active, foreign stock corp, MN)
@@ -196,7 +207,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | `compare_companies` | 3 |
 | `get_filing_document` | 4 by `url`, 10 by `company` + `accession` |
 | `get_insider_trades` | 6 + `limit` (max 20 filings → 26) |
-| `lookup_business_entity` | number of states (max 5) |
+| `lookup_business_entity` | number of states (max 5); × 2 with `include_total` (max 10) |
 
 | Client | Per minute | Per day (UTC) |
 |---|---|---|
@@ -387,9 +398,9 @@ Delaware, the most common state of incorporation, has no open bulk dataset, so i
 
 ```
 src/
-  core/      config, cache (memory LRU | Upstash | tiered), rate limiter, fetch+retry, usage hooks, errors
-  sec/       tickers (fuzzy), submissions, documents (HTML→text, item extraction), financials, xbrl (concept/frames), insider (Form 4)
-  states/    registry (per-state dataset config + normalizers), socrata (SoQL builder, ranking)
+  core/      names (normalisation, bounded edit distance), config, cache (memory LRU | Upstash | tiered), rate limiter, fetch+retry, usage hooks, errors
+  sec/       tickers (fuzzy, did-you-mean), formerNames (curated former names), submissions, documents (HTML→text, item extraction), financials, xbrl (concept/frames), insider (Form 4)
+  states/    registry (per-state dataset config + normalizers), socrata (SoQL builder, spelling variants, ranking, pagination)
   tools.ts   zod schemas + tool handlers (transport-agnostic)
   server.ts  registers tools/prompt/resource on an McpServer (shared by both transports)
   stdio.ts   npm bin  → serveStdio()

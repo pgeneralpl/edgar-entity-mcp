@@ -84,8 +84,9 @@ export function toolCost(tool: string, args: unknown): number {
       // tickers + submissions + up to 4 history pages + one Form 4 per filing (max 20)
       return 6 + Math.min(Math.max(1, Math.floor(num(a.limit, 10))), 20);
     case "lookup_business_entity": {
-      const st = Array.isArray(a.states) && a.states.length ? new Set(a.states).size : 5;
-      return Math.min(st, 5);
+      // One registry query per state, plus one count query per state with include_total.
+      const st = Math.min(Array.isArray(a.states) && a.states.length ? new Set(a.states).size : 5, 5);
+      return a.include_total === true ? st * 2 : st;
     }
     default:
       return 2;
