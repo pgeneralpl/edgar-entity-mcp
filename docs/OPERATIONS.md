@@ -43,6 +43,8 @@ Configuration for operators and self-hosters of edgar-entity-mcp: environment va
 | `MEMORY_CACHE_MB` / `REDIS_MAX_VALUE_BYTES` / `HTTP_TIMEOUT_MS` | 128 / 262144 / 25000 | Tuning (`REDIS_MAX_VALUE_BYTES` is the stored, compressed size) |
 | `HOST` / `ALLOWED_HOSTS` / `ALLOWED_ORIGINS` / `TRUST_PROXY` | `127.0.0.1` / – / – / – | Self-hosted node server only |
 
+**Self-hosting:** set `KEY_REQUEST_URL` to your own contact or issue URL (absolute `https://` only), so the rate-limit and key hints your users see point to you rather than to the upstream project's higher-limits form.
+
 ## Hosted quotas
 
 The hosted endpoint charges each tool call in **units** that approximate how many upstream requests it can trigger:
