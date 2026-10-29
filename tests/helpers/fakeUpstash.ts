@@ -67,8 +67,12 @@ export function fakeUpstash() {
       case "get":
         return kv.get(a[0]!)?.v ?? null;
       case "set": {
-        const exIdx = a.findIndex((x) => x.toLowerCase() === "ex");
-        kv.set(a[0]!, { v: a[1]!, ttl: exIdx > 0 ? Number(a[exIdx + 1]) : undefined });
+        const opt = (name: string) => a.findIndex((x, i) => i >= 2 && x.toLowerCase() === name);
+        if (opt("nx") > 0 && kv.has(a[0]!)) return null;
+        const exIdx = opt("ex");
+        const exatIdx = opt("exat");
+        const ttl = exIdx > 0 ? Number(a[exIdx + 1]) : exatIdx > 0 ? Number(a[exatIdx + 1]) - Math.floor(Date.now() / 1000) : undefined;
+        kv.set(a[0]!, { v: a[1]!, ttl });
         return "OK";
       }
       case "incrby": {

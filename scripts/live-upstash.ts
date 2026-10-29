@@ -151,9 +151,9 @@ try {
   const el = Date.now() - t0;
   check(el >= 1500, `6 acquisitions at 2 rps (burst 2) took ${el} ms`);
 
-  console.log("Cache guard (write budget, compression, 24 h TTL)");
+  console.log("Cache guard (write budget, compression, TTL capped at 24 h and next UTC midnight + 1 h)");
   {
-    const { UpstashCache, cacheBudgetKey, redisCacheKey, cacheWriteStatus, resetCacheWriteState, TTL } = await import("../src/core/cache.js");
+    const { UpstashCache, cacheBudgetKey, redisCacheKey, cacheWriteStatus, resetCacheWriteState, redisTtlSeconds, REDIS_ENTRY_OVERHEAD_BYTES, TTL } = await import("../src/core/cache.js");
     resetCacheWriteState();
     const tr = await realFetch("https://www.sec.gov/files/company_tickers_exchange.json", { headers: { "user-agent": c.secUserAgent, accept: "application/json" } });
     const raw = await tr.text();
@@ -161,20 +161,20 @@ try {
     const uc = new UpstashCache(redis, c.redisMaxValueBytes, c.cacheWriteBudgetBytes);
     let b0 = redisRequests;
     await uc.set("livetest:tickers", raw, TTL.tickers);
-    check(redisRequests - b0 === 3, `first cache write of the day: ${redisRequests - b0} commands (INCRBY + EXPIREAT + SET)`);
+    check(redisRequests - b0 === 3, `first cache write of the day: ${redisRequests - b0} commands (SET NX EXAT + INCRBY + SET)`);
     const rk = redisCacheKey("livetest:tickers");
     const stored = await redis.get<string>(rk);
     check(!!stored && stored.startsWith("\u0001gz1:") && stored.length <= c.redisMaxValueBytes, `ticker file stored gzip+base64: ${stored?.length} bytes (cap ${c.redisMaxValueBytes})`);
     const usage = await realFetch(c.upstashUrl!, { method: "POST", headers: { authorization: `Bearer ${c.upstashToken}` }, body: JSON.stringify(["MEMORY", "USAGE", rk]) }).then((r) => r.json() as Promise<{ result?: number }>);
     console.log(`  MEMORY USAGE of the compressed ticker entry: ${usage.result ?? "n/a"} bytes`);
     const ttl = await redis.ttl(rk);
-    check(ttl > 0 && ttl <= 24 * 3600, `ticker entry TTL ${ttl} s (<= 24 h)`);
+    check(ttl > 0 && ttl <= redisTtlSeconds(TTL.tickers) + 2, `ticker entry TTL ${ttl} s (<= min(24 h, next UTC midnight + 1 h) = ${redisTtlSeconds(TTL.tickers)} s)`);
     b0 = redisRequests;
     check((await uc.get("livetest:tickers")) === raw && redisRequests - b0 === 1, `round trip decompresses to the original (${redisRequests - b0} command)`);
     b0 = redisRequests;
     await uc.set("livetest:small", JSON.stringify({ ok: 1 }), 7 * 24 * 3600);
     check(redisRequests - b0 === 2, `further cache write: ${redisRequests - b0} commands (INCRBY + SET)`);
-    check((await redis.ttl(redisCacheKey("livetest:small"))) <= 24 * 3600, "a 7-day TTL request is capped at 24 h in Redis");
+    check((await redis.ttl(redisCacheKey("livetest:small"))) <= redisTtlSeconds(7 * 24 * 3600) + 2, "a 7-day TTL request is capped at min(24 h, next UTC midnight + 1 h) in Redis");
     const bk = cacheBudgetKey();
     const used = Number(await redis.get<string>(bk));
     const bttl = await redis.ttl(bk);
@@ -186,6 +186,16 @@ try {
     check(redisRequests === b0 && cacheWriteStatus().writes === "budget exhausted", `budget exhausted: 20 writes cost ${redisRequests - b0} commands`);
     b0 = redisRequests;
     check((await tight.get("livetest:small")) !== undefined && redisRequests - b0 === 1, "reads continue while the write budget is exhausted");
+    // 50 concurrent writes against a budget with room for ~10: the local reservation stops the rest.
+    resetCacheWriteState();
+    const before = Number(await redis.get<string>(bk));
+    const one = 100 + redisCacheKey("livetest:cc00").length + REDIS_ENTRY_OVERHEAD_BYTES;
+    const conc = new UpstashCache(redis, c.redisMaxValueBytes, before + 10 * one + 50);
+    await conc.set("livetest:cc-warm", "w", 60); // syncs the memo with the fleet counter
+    const mid = Number(await redis.get<string>(bk));
+    await Promise.all(Array.from({ length: 50 }, (_, i) => conc.set(`livetest:cc${String(i).padStart(2, "0")}`, "q".repeat(100), 60)));
+    const after = Number(await redis.get<string>(bk));
+    check(after <= before + 10 * one + 50 + one && after - mid <= 10 * one, `50 concurrent writes: counter +${after - mid} bytes (room ${before + 10 * one + 50 - mid}, one write ${one})`);
     resetCacheWriteState();
   }
 

@@ -93,7 +93,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cachePrefix: env.CACHE_PREFIX?.trim() || "eem:v1:",
     memoryCacheMb: num(env.MEMORY_CACHE_MB, 128),
     redisMaxValueBytes: num(env.REDIS_MAX_VALUE_BYTES, 256 * 1024),
-    cacheWriteBudgetBytes: num0(env.CACHE_WRITE_BUDGET_BYTES, 150 * 1024 * 1024),
+    cacheWriteBudgetBytes: num0(env.CACHE_WRITE_BUDGET_BYTES, 64 * 1024 * 1024),
     httpTimeoutMs: num(env.HTTP_TIMEOUT_MS, 25_000),
     apiKeys: (env.MCP_API_KEYS ?? "")
       .split(",")

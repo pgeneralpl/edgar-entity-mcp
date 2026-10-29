@@ -16,12 +16,18 @@ import {
   cacheWriteStatus,
   decodeFromRedis,
   encodeForRedis,
+  REDIS_COMPRESS_MAX_RATIO,
+  REDIS_ENTRY_OVERHEAD_BYTES,
   redisCacheKey,
+  redisTtlSeconds,
+  resetCacheWriteState,
 } from "../src/core/cache.js";
 import { UpstashQuotaStore, chargeQuota, type Principal } from "../src/core/quota.js";
 import { degradedStatus, isRedisCapacityError, redisDegraded } from "../src/core/degraded.js";
 import { ipPrincipal, clearSaltMemo } from "../src/core/apiKeys.js";
-import { healthPayload } from "../src/http/health.js";
+import { healthPayload, healthResponse } from "../src/http/health.js";
+import { runWithContext } from "../src/core/context.js";
+import { REDIS_READ_BYTES_PER_UNIT, settleQuota } from "../src/core/quota.js";
 import { FAKE, fakeUpstash } from "./helpers/fakeUpstash.js";
 
 const SALT = "budget-test-secret-0123456789abcdefghij";
@@ -53,10 +59,13 @@ afterEach(() => {
 });
 
 describe("config defaults", () => {
-  it("256 KB max value, 150 MB/day write budget, 0 disables Redis cache writes", () => {
+  it("256 KB max value, 64 MiB/day write budget, 0 disables Redis cache writes", () => {
     const c = loadConfig({});
     expect(c.redisMaxValueBytes).toBe(256 * 1024);
-    expect(c.cacheWriteBudgetBytes).toBe(150 * 1024 * 1024);
+    expect(c.cacheWriteBudgetBytes).toBe(64 * 1024 * 1024);
+    // Fixed 250 MB plan (250e6 bytes): two days' budget (00:00-01:00 UTC worst case) + 1 MB for
+    // counters, keys and suppression must leave >= 40 % headroom.
+    expect(2 * c.cacheWriteBudgetBytes + 1e6).toBeLessThan(0.6 * 250e6);
     expect(loadConfig({ CACHE_WRITE_BUDGET_BYTES: "1000" }).cacheWriteBudgetBytes).toBe(1000);
     expect(loadConfig({ CACHE_WRITE_BUDGET_BYTES: "0" }).cacheWriteBudgetBytes).toBe(0);
     expect(loadConfig({ REDIS_MAX_VALUE_BYTES: "1000" }).redisMaxValueBytes).toBe(1000);
@@ -64,16 +73,17 @@ describe("config defaults", () => {
 });
 
 describe("daily fleet-wide cache-write budget", () => {
-  it("costs INCRBY + SET per write (+ EXPIREAT once per day), the counter key has a <= 25 h TTL", async () => {
+  it("costs INCRBY + SET per write (+ SET NX EXAT once per day), the counter key is created with a <= 25 h TTL", async () => {
     const c = new UpstashCache(redis, 10_000, 1_000_000);
     expect(await billed(() => c.set("a", "x".repeat(100), 60))).toBe(3);
     expect(await billed(() => c.set("b", "y".repeat(100), 60))).toBe(2);
     const bk = cacheBudgetKey();
     expect(bk).toBe("eem:v1:cw:20261029");
     const counter = f.kv.get(bk)!;
-    expect(Number(counter.v)).toBe(2 * (100 + redisCacheKey("a").length));
+    expect(Number(counter.v)).toBe(2 * (100 + redisCacheKey("a").length + REDIS_ENTRY_OVERHEAD_BYTES));
     expect(counter.ttl).toBe(12 * 3600 + 3600); // UTC midnight + 1 h, i.e. at most 25 h
-    expect(f.commands.map((x) => String(x[0]).toLowerCase())).toEqual(["incrby", "expireat", "set", "incrby", "set"]);
+    expect(f.commands.map((x) => String(x[0]).toLowerCase())).toEqual(["set", "incrby", "set", "incrby", "set"]);
+    expect(f.commands[0]!.map((x) => String(x).toLowerCase())).toEqual([ "set", bk, "0", "nx", "exat", String(Math.floor(T0 / 1000) + 13 * 3600)]);
     expect(await c.get("a")).toBe("x".repeat(100));
   });
 
@@ -92,7 +102,7 @@ describe("daily fleet-wide cache-write budget", () => {
     expect(await c.get("k1")).toBe(v);
     vi.setSystemTime(Date.UTC(2026, 9, 30, 0, 0, 1)); // next UTC day
     expect(cacheWriteStatus().writes).toBe("ok");
-    expect(await billed(() => c.set("k3", v, 60))).toBe(3); // new day's counter + its EXPIREAT
+    expect(await billed(() => c.set("k3", v, 60))).toBe(3); // new day's counter (SET NX EXAT) + INCRBY + SET
     expect(f.kv.has("eem:v1:cw:20261030")).toBe(true);
   });
 
@@ -126,13 +136,19 @@ const anon = (i: number) => ipPrincipal(`10.0.0.${i}`);
 const ENV_WITH = (x: Record<string, string>) => ({ ...ENV, ...x }) as NodeJS.ProcessEnv;
 
 describe("TTLs", () => {
-  it("documents and parsed Form 4s live 24 h; Redis TTL is capped at 24 h", async () => {
+  it("documents and parsed Form 4s live 24 h; Redis TTL is capped at 24 h and at next UTC midnight + 1 h", async () => {
     expect(TTL.filingDocShared).toBe(24 * 3600);
     expect(TTL.filingDoc).toBe(24 * 3600);
     expect(Math.max(...Object.values(TTL))).toBeLessThanOrEqual(24 * 3600);
     const c = new UpstashCache(redis, 10_000, 1_000_000);
-    await c.set("doc", "text", 7 * 24 * 3600);
-    expect(f.kv.get(redisCacheKey("doc"))!.ttl).toBe(24 * 3600);
+    await c.set("doc", "text", 7 * 24 * 3600); // 12:00 UTC: 13 h to 01:00 UTC next day
+    expect(f.kv.get(redisCacheKey("doc"))!.ttl).toBe(13 * 3600);
+    await c.set("short", "text", 600); // shorter normal TTL wins
+    expect(f.kv.get(redisCacheKey("short"))!.ttl).toBe(600);
+    expect(redisTtlSeconds(24 * 3600, Date.UTC(2026, 9, 29, 23, 0))).toBe(2 * 3600);
+    expect(redisTtlSeconds(24 * 3600, Date.UTC(2026, 9, 29, 0, 0, 0))).toBe(24 * 3600); // 24 h cap
+    expect(redisTtlSeconds(6 * 3600, Date.UTC(2026, 9, 29, 23, 59, 59))).toBe(3601);
+    expect(redisTtlSeconds(0)).toBe(1);
   });
 });
 
@@ -161,7 +177,7 @@ describe("max value size and compression", () => {
     expect(stored.startsWith("\u0001gz1:")).toBe(true);
     expect(stored.length).toBeLessThanOrEqual(256 * 1024);
     expect(stored.length).toBeLessThan(raw.length / 2);
-    expect(Number(f.kv.get(cacheBudgetKey())!.v)).toBe(stored.length + redisCacheKey("tickers").length); // budget counts stored bytes
+    expect(Number(f.kv.get(cacheBudgetKey())!.v)).toBe(stored.length + redisCacheKey("tickers").length + REDIS_ENTRY_OVERHEAD_BYTES); // budget counts stored bytes
     expect(await c.get("tickers")).toBe(raw);
   });
 
@@ -229,5 +245,75 @@ describe("'redis full' (eviction off, data-size limit reached) disables only cac
     expect(redisDegraded()).toBe(true);
     expect(degradedStatus().reason).toBe("redis plan limit reached");
     expect(cacheWriteStatus().writes).toBe("ok");
+  });
+});
+
+describe("review fixes: concurrency, counter TTL, gzip guard, health privacy, read bytes", () => {
+  it("50 concurrent writes against a small budget never exceed the budget plus one write", async () => {
+    const budget = 5_000;
+    const c = new UpstashCache(redis, 10_000, budget);
+    const one = 100 + redisCacheKey("c00").length + REDIS_ENTRY_OVERHEAD_BYTES;
+    await Promise.all(Array.from({ length: 50 }, (_, i) => c.set(`c${String(i).padStart(2, "0")}`, "z".repeat(100), 60)));
+    const used = Number(f.kv.get(cacheBudgetKey())!.v);
+    expect(used).toBeLessThanOrEqual(budget + one);
+    expect(used).toBeLessThanOrEqual(budget); // one instance: the local reservation alone keeps it under
+    const stored = Array.from({ length: 50 }, (_, i) => redisCacheKey(`c${String(i).padStart(2, "0")}`)).filter((k) => f.kv.has(k)).length;
+    expect(stored).toBeGreaterThan(0);
+    expect(stored * one).toBe(used);
+    expect(cacheWriteStatus().writes).toBe("budget exhausted");
+  });
+
+  it("the budget counter gets its TTL in the command that creates it (no separate EXPIREAT to fail)", async () => {
+    const c = new UpstashCache(redis, 10_000, 1_000_000);
+    await c.set("a", "x", 60);
+    expect(f.commands.some((x) => String(x[0]).toLowerCase() === "expireat")).toBe(false);
+    expect(f.kv.get(cacheBudgetKey())!.ttl).toBe(13 * 3600);
+    // Another instance already created today's counter: SET NX is a no-op, the TTL is kept, INCRBY adds.
+    f.kv.set(cacheBudgetKey(), { v: "500", ttl: 7200 });
+    resetCacheWriteState();
+    await c.set("b", "y", 60);
+    expect(f.kv.get(cacheBudgetKey())!.ttl).toBe(7200);
+    expect(Number(f.kv.get(cacheBudgetKey())!.v)).toBe(500 + 1 + redisCacheKey("b").length + REDIS_ENTRY_OVERHEAD_BYTES);
+  });
+
+  it("does not gzip values over 20x the max stored size (0 commands, no CPU spent)", async () => {
+    const c = new UpstashCache(redis, 1000, 1_000_000);
+    expect(REDIS_COMPRESS_MAX_RATIO).toBe(20);
+    expect(await billed(() => c.set("huge", "a".repeat(20_001), 60))).toBe(0); // would compress to << 1000, but is skipped
+    expect(await billed(() => c.set("ok", "a".repeat(19_999), 60))).toBe(3); // compressible and under 20x: stored
+    expect(f.kv.get(redisCacheKey("ok"))!.v.startsWith("\u0001gz1:")).toBe(true);
+  });
+
+  it("/health shows 'budget exhausted' only with HEALTH_SECRET", async () => {
+    const env = ENV_WITH({ HEALTH_SECRET: "health-secret-0123456789" });
+    resetConfig(loadConfig(env));
+    const c = new UpstashCache(redis, 10_000, 100);
+    await c.set("a", "x".repeat(200), 60);
+    expect(cacheWriteStatus().writes).toBe("budget exhausted");
+    const pub = healthPayload(env).redis_cache as Record<string, unknown>;
+    expect(pub.writes).toBe("on");
+    expect(JSON.stringify(pub)).not.toMatch(/exhaust|known_used/);
+    const anonBody = await (await healthResponse(new Request("https://x/health?deep=1"), env)).json();
+    expect(JSON.stringify(anonBody)).not.toMatch(/exhaust|redis_write_budget/);
+    const priv = await (await healthResponse(new Request("https://x/health?deep=1", { headers: { "x-health-secret": "health-secret-0123456789" } }), env)).json();
+    expect(priv.redis_write_budget.state).toBe("exhausted");
+    expect(priv.redis_write_budget.until).toBe("2026-10-30T00:00:00.000Z");
+  });
+
+  it("Redis cache bytes read count toward the call's actual cost (bandwidth bound), capped at the estimate", async () => {
+    const c = new UpstashCache(redis, 10 * 1024 * 1024, 1_000_000);
+    f.kv.set(redisCacheKey("big"), { v: "b".repeat(2 * REDIS_READ_BYTES_PER_UNIT + 1) });
+    const refunds: number[] = [];
+    const settle = (cost: number) =>
+      runWithContext({ transport: "http" }, async () => {
+        const ctx = (await import("../src/core/context.js")).currentContext()!;
+        ctx.reservation = { p: anon(9), cost, limits: {}, store: { refund: (_p: unknown, back: number) => refunds.push(back) }, at: Date.now() };
+        await c.get("big");
+        settleQuota();
+      });
+    await settle(5);
+    expect(refunds).toEqual([2]); // 3 units charged: ceil(2 * 256 KiB + 1 / 256 KiB)
+    await settle(2);
+    expect(refunds).toEqual([2]); // capped at the 2-unit estimate: nothing refunded
   });
 });

@@ -97,18 +97,18 @@ try {
   srv.kill();
 }
 
-console.log("\nAnonymous quota (QUOTA_ANON_PER_MINUTE=6)");
-srv = await start(port + 2, { QUOTA_ANON_PER_MINUTE: "6" });
+console.log("\nAnonymous quota (QUOTA_ANON_PER_MINUTE=4)");
+// A single call whose 5-unit estimate is above the per-minute limit is refused before it runs
+// (deterministic: no earlier call whose refund could make room).
+srv = await start(port + 2, { QUOTA_ANON_PER_MINUTE: "4" });
 try {
   const client = new Client({ name: "e2e-http-quota", version: "0.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://localhost:${port + 2}/mcp`)));
-  const a = await call(client, "lookup_business_entity", { name: "Newmont Corporation", states: ["CO", "CT", "NY", "OR", "PA"] }); // 5 units
-  check(!a.isError, "first call within budget");
-  const b = await call(client, "lookup_business_entity", { name: "Newmont Corporation", states: ["CO", "NY"] }); // 2 more > 6
+  const b = await call(client, "lookup_business_entity", { name: "Newmont Corporation", states: ["CO", "CT", "NY", "OR", "PA"] }); // 5 units > 4
   const err = (b.data.error ?? b.data) as { code?: string; retry_after_seconds?: number; hint?: string; details?: { retry_after_seconds?: number } };
   console.log("  sample:", snip(b.data, 400));
-  const retry = err.retry_after_seconds ?? err.details?.retry_after_seconds ?? 0;
-  check(b.isError && err.code === "RATE_LIMITED" && retry > 0 && /API key/i.test(JSON.stringify(b.data)), `over budget -> RATE_LIMITED, retry after ${retry}s, key hint`);
+  const retry = err.retry_after_seconds ?? err.details?.retry_after_seconds;
+  check(b.isError && err.code === "RATE_LIMITED" && typeof retry === "number" && retry >= 1 && /API key/i.test(JSON.stringify(b.data)), `over budget -> RATE_LIMITED, retry after ${retry}s (>= 1), key hint`);
   await client.close();
 } finally {
   srv.kill();

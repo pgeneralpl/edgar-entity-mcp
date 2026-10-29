@@ -5,6 +5,7 @@ import { config } from "../config.js";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { isRedisCapacityError, markRedisDegraded, redisDegraded } from "./degraded.js";
 import { logError } from "./errors.js";
+import { currentContext } from "./context.js";
 
 /**
  * Pluggable string cache. Values are opaque strings (usually JSON).
@@ -55,9 +56,11 @@ const GZ_MARK = "\u0001gz1:";
 /** Hard cap on a decompressed value (defence against a corrupt or hostile entry). */
 const GUNZIP_MAX_BYTES = 32 * 1024 * 1024;
 
+/** Values longer than this multiple of the max stored size are not even compressed (they would not fit). */
+export const REDIS_COMPRESS_MAX_RATIO = 20;
 export function encodeForRedis(value: string): string {
   if (value.length < REDIS_COMPRESS_MIN_BYTES) return value;
-  const z = GZ_MARK + gzipSync(Buffer.from(value, "utf8"), { level: 9 }).toString("base64");
+  const z = GZ_MARK + gzipSync(Buffer.from(value, "utf8"), { level: 6 }).toString("base64");
   return z.length < value.length ? z : value;
 }
 export function decodeFromRedis(stored: string): string | undefined {
@@ -73,16 +76,24 @@ export function decodeFromRedis(stored: string): string | undefined {
 /**
  * Cache-write guard (the Redis database runs with eviction OFF, so the cache must bound itself):
  *  - a fleet-wide daily byte budget (CACHE_WRITE_BUDGET_BYTES) counted with one INCRBY on
- *    `<prefix>cw:<YYYYMMDD>` pipelined with the SET (EXPIREAT once per instance per day: the key
- *    expires 1 h after its UTC day ends, i.e. a <= 25 h TTL). The last counter value is memoised; once
- *    the known total plus the next value would exceed the budget, writes are skipped locally with
- *    0 commands until UTC midnight. Reads continue.
+ *    `<prefix>cw:<YYYYMMDD>` pipelined with the SET. The first write of the day per instance also
+ *    sends `SET <counter> 0 NX EXAT <midnight + 1 h>` *before* the INCRBY, so the counter is created
+ *    with its TTL (<= 25 h) in the same command that creates it. Each write counts its stored size
+ *    plus REDIS_ENTRY_OVERHEAD_BYTES. The size is reserved locally *before* the request is sent
+ *    (concurrent writes on one instance can't overspend), then the memo is raised to the fleet total
+ *    from the reply. Once the known total plus the next write would exceed the budget, writes are
+ *    skipped locally with 0 commands until UTC midnight. Reads continue.
+ *  - every Redis TTL is capped at min(normal TTL, 24 h, next UTC midnight + 1 h - now), so entries
+ *    written on one UTC day are gone 1 h after it ends: resident cache data stays about one day's
+ *    budget (at most 2x, only if the next day's budget is spent within its first hour).
  *  - a capacity error on a cache write (`ERR DB capacity quota exceeded`, OOM / maxmemory) switches
  *    only cache writes off on this instance for CACHE_FULL_COOLDOWN_MS ("redis full"). Quotas,
  *    API keys and suppression are not affected and keep their own fail-closed handling.
  */
 export const CACHE_FULL_COOLDOWN_MS = 10 * 60_000;
-const writeState = { day: "", known: 0, exhausted: false, expireSetDay: "", fullUntil: 0, fullSince: 0, skipped: 0 };
+/** Approximate per-key memory overhead (key metadata, expiry entry) counted on top of key + value. */
+export const REDIS_ENTRY_OVERHEAD_BYTES = 96;
+const writeState = { day: "", known: 0, exhausted: false, expireSetDay: "", fullUntil: 0, fullSince: 0 };
 
 function utcDayOf(now: number): string {
   return new Date(now).toISOString().slice(0, 10).replace(/-/g, "");
@@ -91,11 +102,16 @@ function nextUtcMidnightSeconds(now: number): number {
   const d = new Date(now);
   return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000);
 }
+/** Redis TTL actually used: min(ttl, 24 h, seconds until next UTC midnight + 1 h), at least 1 s. */
+export function redisTtlSeconds(ttlSeconds: number, now = Date.now()): number {
+  const toCutoff = nextUtcMidnightSeconds(now) + 3600 - Math.floor(now / 1000);
+  return Math.max(1, Math.min(Math.round(ttlSeconds), 24 * 3600, toCutoff));
+}
 export function cacheBudgetKey(now = Date.now()): string {
   return `${config().cachePrefix}cw:${utcDayOf(now)}`;
 }
 export function resetCacheWriteState(): void {
-  Object.assign(writeState, { day: "", known: 0, exhausted: false, expireSetDay: "", fullUntil: 0, fullSince: 0, skipped: 0 });
+  Object.assign(writeState, { day: "", known: 0, exhausted: false, expireSetDay: "", fullUntil: 0, fullSince: 0 });
 }
 function rollDay(now: number): string {
   const day = utcDayOf(now);
@@ -137,7 +153,12 @@ export class UpstashCache implements Cache {
     if (redisDegraded()) return undefined; // save commands / latency while Redis is down or over plan
     try {
       const v = await this.redis.get<string>(redisCacheKey(key));
-      return v == null ? undefined : decodeFromRedis(String(v));
+      if (v == null) return undefined;
+      const s = String(v);
+      // Redis read volume is charged to the call's quota (bandwidth bound, see settleQuota).
+      const ctx = currentContext();
+      if (ctx) ctx.redisReadBytes = (ctx.redisReadBytes ?? 0) + s.length;
+      return decodeFromRedis(s);
     } catch (e) {
       markRedisDegraded(e);
       return undefined; // cache failures must never break tools
@@ -149,24 +170,27 @@ export class UpstashCache implements Cache {
     if (now < writeState.fullUntil) return; // "redis full": 0 commands
     const day = rollDay(now);
     if (writeState.exhausted) return; // budget exhausted until UTC midnight: 0 commands
+    if (value.length > REDIS_COMPRESS_MAX_RATIO * this.maxValueBytes) return; // can't fit: don't spend CPU on gzip
     const stored = encodeForRedis(value);
     const rkey = redisCacheKey(key);
     if (Buffer.byteLength(stored, "utf8") > this.maxValueBytes) return;
-    const bytes = Buffer.byteLength(stored, "utf8") + rkey.length;
+    const bytes = Buffer.byteLength(stored, "utf8") + rkey.length + REDIS_ENTRY_OVERHEAD_BYTES;
     if (writeState.known + bytes > this.budgetBytes) {
       writeState.exhausted = true;
       return;
     }
+    writeState.known += bytes; // reserve before the await: concurrent writes see it
     const bkey = `${config().cachePrefix}cw:${day}`;
-    const setExpiry = writeState.expireSetDay !== day;
+    const createCounter = writeState.expireSetDay !== day;
     try {
       const p = this.redis.pipeline();
+      // Creates the counter with its TTL atomically; a no-op when it already exists.
+      if (createCounter) p.set(bkey, "0", { nx: true, exat: nextUtcMidnightSeconds(now) + 3600 });
       p.incrby(bkey, bytes);
-      if (setExpiry) p.expireat(bkey, nextUtcMidnightSeconds(now) + 3600);
-      p.set(rkey, stored, { ex: Math.max(1, Math.min(Math.round(ttlSeconds), 24 * 3600)) });
+      p.set(rkey, stored, { ex: redisTtlSeconds(ttlSeconds, now) });
       const res = (await p.exec()) as unknown[];
-      if (setExpiry) writeState.expireSetDay = day;
-      const total = Number(res[0]);
+      if (createCounter) writeState.expireSetDay = day;
+      const total = Number(res[createCounter ? 1 : 0]);
       if (writeState.day === day && Number.isFinite(total)) {
         writeState.known = Math.max(writeState.known, total);
         if (writeState.known >= this.budgetBytes) writeState.exhausted = true;

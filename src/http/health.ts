@@ -44,16 +44,30 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
   };
 }
 
-/** Cache-write guard state (eviction is off, so the cache bounds itself). No traffic volumes exposed. */
+/**
+ * Cache-write guard state (eviction is off, so the cache bounds itself). No traffic volumes exposed:
+ * whether today's write budget is spent (a usage signal) is shown only with `?deep=1` + HEALTH_SECRET.
+ */
 function redisCacheHealth(budgetBytes: number, maxValueBytes: number) {
   const w = cacheWriteStatus();
+  const full = budgetBytes > 0 && w.writes === "redis full";
   return {
-    writes: budgetBytes <= 0 ? "disabled" : w.writes, // "ok" | "redis full" | "budget exhausted" | "disabled"
-    ...(w.until && w.writes !== "ok" ? { until: w.until } : {}),
+    writes: budgetBytes <= 0 ? "disabled" : full ? "redis full" : "on", // "on" | "redis full" | "disabled"
+    ...(full && w.until ? { until: w.until } : {}),
     write_budget_bytes_per_utc_day: budgetBytes,
     max_value_bytes: maxValueBytes,
     compressed_from_bytes: REDIS_COMPRESS_MIN_BYTES,
-    max_ttl_hours: 24,
+    max_ttl: "24 h, and never past 01:00 UTC of the next day",
+  };
+}
+
+/** Private (HEALTH_SECRET) view of today's write budget. */
+function writeBudgetDetail() {
+  const w = cacheWriteStatus();
+  return {
+    state: w.writes === "budget exhausted" ? "exhausted" : w.writes === "ok" ? "ok" : w.writes,
+    ...(w.until && w.writes === "budget exhausted" ? { until: w.until } : {}),
+    known_used_bytes: w.known_used_bytes,
   };
 }
 
@@ -65,7 +79,7 @@ function secretMatches(given: string | null, secret: string | undefined): boolea
 }
 
 /**
- * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds a Redis PING.
+ * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds a Redis PING and today's cache-write budget state.
  * Without a matching secret the deep check is silently skipped. Errors are never echoed.
  */
 export async function healthResponse(req?: Request, env: NodeJS.ProcessEnv = process.env): Promise<Response> {
@@ -75,6 +89,7 @@ export async function healthResponse(req?: Request, env: NodeJS.ProcessEnv = pro
       body.deep = "skipped (requires x-health-secret)";
     } else {
       const redis = getRedis();
+      if (redis) body.redis_write_budget = writeBudgetDetail();
       if (!redis) body.redis = "not configured";
       else {
         const t0 = Date.now();
