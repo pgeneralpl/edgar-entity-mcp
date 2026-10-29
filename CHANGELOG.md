@@ -3,6 +3,11 @@
 ## 0.2.0 (unreleased)
 
 - **Aggregate usage statistics (hosted server):** daily counters in Redis (`eem:v1:stats:YYYY-MM-DD:{c,u,cl}`, `EXPIREAT` end of the UTC day + 30 days): calls / ok / errors per tool, error codes, tier, latency histogram (approximate p50/p95), MCP sessions (`initialize`), client-software labels from a fixed allowlist of well-known MCP clients (major version only; anything else `other`; counted once per principal per day after its first successful tool call), degraded-mode activations, and approximate unique clients per day (HyperLogLog over `HMAC(random daily salt, principal id)`; the salt's TTL ends at 01:00 UTC the next day, after which no member is written for that day). Recorded only by Vercel production (`VERCEL_ENV=production`) or self-hosted servers (no `VERCEL`), never by previews. Aggregated per instance and written with one fire-and-forget `EVALSHA` per ≤ 1 flush/min/instance (1.5 s timeout, never fails or slows a request, 0 commands while degraded); ≈ 95 keys, ≤ ~1 MB. `STATS_ENABLED=false` turns it off. New `GET /stats?days=N` (1–30, default 7) gated by `STATS_SECRET` (`x-stats-secret`, constant-time; unset / wrong / missing → 404). Privacy policy and README updated.
+- **Security follow-up to #8:**
+  - Natural-person (individual) registered-agent names/addresses and the related entity addresses are **never returned on the hosted endpoint**, whatever API key is sent; `include_agent_details` is ignored there (detected via `VERCEL`). Local stdio works as before. A self-hosted HTTP server returns them to verified API-key callers only when the operator sets the new `ALLOW_PERSON_AGENT_DETAILS=1` (ignored on Vercel). Organizational agents are still shown. Tool description, schema, server instructions, DATA_SOURCES, README, llms.txt and the privacy policy updated to match.
+  - `docs/OPERATIONS.md` trimmed to self-hoster configuration with generic wording (no hosted plan, sizing or per-instance internals); the Preview-environment note is corrected.
+  - Removed pricing/monetization text (LAUNCH.md, privacy policy, usage-hook comments).
+  - Docs: a cached call *usually* costs 1 unit; the anonymous daily limit is "up to 60/day; shared networks may get less"; llms.txt no longer hard-codes versions and notes that tool output is untrusted data, not instructions.
 
 - **Post-launch hardening (MCP SEC Security audit, issue #5):**
   - `/health?deep=1` without a valid `x-health-secret` (or with `HEALTH_SECRET` unset) now returns **401** and no health data (was 200 with `deep: "skipped …"`). The authorised deep output adds `node_version` (`process.version`) and `node_runtime_patched`; `node_runtime_patched` is removed from the public `/health`.
@@ -52,4 +57,4 @@ Security hardening (audit 2026-10-20).
 - `company_research_brief` prompt and `edgar-entity://data-sources` resource
 - stdio CLI (`npx edgar-entity-mcp`) and Streamable HTTP (mcp-handler, Vercel function, local node server)
 - Cache: in-memory LRU, or Upstash Redis with an L1 in front; SEC limiter (~8 req/s, optional fleet-wide); retries on 429/5xx
-- API-key gate and usage hooks for future monetization
+- API-key gate and per-call usage hooks (access control, quotas, custom metering/logging)

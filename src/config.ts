@@ -60,6 +60,14 @@ export interface Config {
   maxBodyBytes: number;
   maxDocumentBytes: number;
   suppressionFile?: string;
+  /**
+   * Natural-person registered-agent details (include_agent_details) on the HTTP transport. Off unless
+   * ALLOW_PERSON_AGENT_DETAILS=1/true on a self-hosted server; always off on Vercel (the hosted endpoint),
+   * whatever the variable says. stdio (local) use is unaffected.
+   */
+  allowPersonAgentDetails: boolean;
+  /** Running on Vercel (the hosted endpoint, including previews). */
+  onVercel: boolean;
 }
 
 export const DEFAULT_SEC_USER_AGENT = `${PACKAGE_NAME}/${VERSION} contact@example.com`;
@@ -134,6 +142,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
     maxDocumentBytes: num(env.MAX_DOCUMENT_BYTES, 15 * 1024 * 1024),
     suppressionFile: env.SUPPRESSION_FILE?.trim() || undefined,
+    allowPersonAgentDetails: /^(1|true)$/i.test(env.ALLOW_PERSON_AGENT_DETAILS?.trim() ?? "") && !env.VERCEL,
+    onVercel: !!env.VERCEL,
   };
 }
 

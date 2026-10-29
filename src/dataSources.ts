@@ -4,7 +4,7 @@ function build(): string {
   const lines: string[] = [];
   lines.push("# Data sources & licenses", "");
   lines.push(
-    "This software (MIT) contains no data; it queries official public sources at request time. Upstream terms below were reviewed on 2026-10-20. Re-verify before commercial launch; terms can change.",
+    "This software (MIT) contains no data; it queries official public sources at request time. Upstream terms below were reviewed on 2026-10-20. Re-verify periodically; terms can change.",
     "",
   );
   lines.push("## SEC EDGAR (all SEC tools)", "");
@@ -27,12 +27,12 @@ function build(): string {
   lines.push(
     "State registries are public records, but some fields identify natural persons. What this server returns:",
     "",
-    "- **Registered agents / service-of-process contacts**: commercial and organizational agents (e.g. registered-agent companies) are returned. Agents that appear to be individuals (CO and OR mark person-name fields; NY is classified heuristically) are returned as `{ kind: \"individual\", withheld: true }` unless the caller passes `include_agent_details: true`.",
+    "- **Registered agents / service-of-process contacts**: commercial and organizational agents (e.g. registered-agent companies) are returned. Agents that appear to be individuals (CO and OR mark person-name fields; NY is classified heuristically) are returned as `{ kind: \"individual\", withheld: true }`. The hosted endpoint never returns them; `include_agent_details: true` reveals them only in local stdio use or on a self-hosted server with `ALLOW_PERSON_AGENT_DETAILS=1` (verified API-key callers).",
     "- **Entity addresses** (principal/mailing) are returned as published; for very small businesses these can be a person's home address.",
     "- **PA officer names** are dropped (the source is row-per-officer; rows are de-duplicated without names).",
     "- **SEC Form 4 insiders**: get_insider_trades returns reporting owners' names, roles and transactions. These are statutory public disclosures (Section 16, Securities Exchange Act) and are needed for the tool's purpose.",
     "- **Erasure / objection requests**: operators can suppress an entity's personal fields (`entity:<STATE>:<id>`) or an agent name (`agent:<name>`) via the built-in list (src/states/suppression-list.ts), a JSON file (SUPPRESSION_FILE) or the Redis set managed with `scripts/suppress.ts`. Suppressed data is never returned, even with include_agent_details.",
-    "- **Hosted rate-limit state**: only integer counters keyed by a daily-rotating HMAC of the client IP (or the public API key id), with TTL equal to the enforced window (25 h per day; per-minute limits are in memory only). API key records hold only a creation date and optional limits (no owner name or contact) and can be deleted with scripts/delete-key.ts. No raw IPs, user agents, paths or tool arguments are stored in Redis or written to logs. Individual registered agents, and related entity addresses, are returned only to API-key callers who ask for them. See README > What the hosted server stores.",
+    "- **Hosted rate-limit state**: only integer counters keyed by a daily-rotating HMAC of the client IP (or the public API key id), with TTL equal to the enforced window (25 h per day; per-minute limits are in memory only). API key records hold only a creation date and optional limits (no owner name or contact) and can be deleted with scripts/delete-key.ts. No raw IPs, user agents, paths or tool arguments are stored in Redis or written to logs. Individual registered agents, and related entity addresses, are never returned by the hosted endpoint. See docs/OPERATIONS.md > What the hosted server stores.",
     "- Do not use registry data for FCRA-regulated decisions (credit, employment, tenancy, insurance) or other purposes prohibited by the source portals.",
     "",
   );

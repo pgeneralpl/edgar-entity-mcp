@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ToolError, toToolError } from "./core/errors.js";
 import { UNTRUSTED_NOTICE, cleanDeep, wrapUntrusted } from "./core/untrusted.js";
-import { callerIsTrusted } from "./core/context.js";
+import { personAgentDetailsAllowed } from "./core/context.js";
 import { loadSuppression } from "./states/suppression.js";
 import { compact } from "./core/util.js";
 import { resolveCompany, searchCompanies } from "./sec/tickers.js";
@@ -264,7 +264,7 @@ export const getInsiderTradesTool = def({
 export const lookupBusinessEntity = def({
   name: "lookup_business_entity",
   title: "State business-entity registry lookup",
-  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (individual agents withheld unless include_agent_details=true), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
+  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are always withheld on the hosted endpoint), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
   inputSchema: z.object({
     name: z.string().min(2).max(200).optional().describe("Entity name or fragment, e.g. 'Tiffany and Company'"),
     entity_id: z.string().min(1).max(40).optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
@@ -275,13 +275,14 @@ export const lookupBusinessEntity = def({
     include_agent_details: z
       .boolean()
       .default(false)
-      .describe("Include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Requires an API key on the hosted server. Default false: only organizational agents are shown."),
+      .describe("Local/self-hosted use only: include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Ignored on the hosted endpoint, which never returns them. Default false: only organizational agents are shown."),
   }),
   async run(a) {
     if (!a.name && !a.entity_id) throw new ToolError("INVALID_INPUT", "Provide name and/or entity_id.");
     const states = [...new Set(a.states?.length ? a.states : SUPPORTED_STATES)];
-    // M-b: individual agent details only for API-key callers (and local stdio use).
-    const detailsAllowed = callerIsTrusted();
+    // Natural-person agent details: never on the hosted endpoint; local stdio, or self-hosted HTTP with
+    // ALLOW_PERSON_AGENT_DETAILS=1 and a verified API key (see personAgentDetailsAllowed).
+    const detailsAllowed = personAgentDetailsAllowed();
     const includeAgentDetails = a.include_agent_details && detailsAllowed;
     const suppression = await loadSuppression(); // M-c: refuse before any upstream request if unavailable
     const settled = await Promise.allSettled(
@@ -310,9 +311,9 @@ export const lookupBusinessEntity = def({
       notice: states.includes("CO") ? "CO data modified from its original source, the State of Colorado, which makes no warranty; see list_supported_states." : undefined,
       privacy:
         a.include_agent_details && !detailsAllowed
-          ? "include_agent_details requires an API key; individual (natural-person) agents and their related addresses were withheld."
+          ? "include_agent_details is not available on this server (the hosted endpoint never returns natural-person agent details); individual agents and their related addresses were withheld."
           : withheld || JSON.stringify(results).includes('"addresses_withheld":true')
-            ? "Names/addresses of individual (natural-person) agents, and entity addresses where a related party is an individual, are withheld by default; API-key callers may pass include_agent_details=true for a legitimate need."
+            ? "Names/addresses of individual (natural-person) agents, and entity addresses where a related party is an individual, are withheld. They are never returned by the hosted endpoint."
             : undefined,
       untrusted_fields: ["results[].name", "results[].location_name", "results[].principal_address", "results[].mailing_address", "results[].registered_agent", "results[].service_of_process"],
     });
