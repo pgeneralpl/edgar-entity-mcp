@@ -7,6 +7,8 @@
   - Natural-person (individual) registered-agent names/addresses and the related entity addresses are **never returned on the hosted endpoint**, whatever API key is sent; `include_agent_details` is ignored there (detected via `VERCEL`). Local stdio works as before. A self-hosted HTTP server returns them to verified API-key callers only when the operator sets the new `ALLOW_PERSON_AGENT_DETAILS=1` (ignored on Vercel). Organizational agents are still shown. Tool description, schema, server instructions, DATA_SOURCES, README, llms.txt and the privacy policy updated to match.
   - `docs/OPERATIONS.md` trimmed to self-hoster configuration with generic wording (no hosted plan, sizing or per-instance internals); the Preview-environment note is corrected.
   - Removed pricing/monetization text (LAUNCH.md, privacy policy, usage-hook comments).
+  - Stricter person/organization heuristic (fail closed): names ending in one or two initials (`SMITH JOHN L P`, `GARCIA MARIA N A`) are people unless the suffix is punctuated (`L.P.`, `L.L.C.`, `N.A.` with BANK/TRUST) after a real word; `BANK` counts only with another organization word (`AARON BANK` is a person). Wording now says individual agents are *withheld (automated classification)* instead of *never returned*.
+  - Hosted detection: any of `VERCEL`, `VERCEL_ENV` or `VERCEL_REGION` set. Public `/health` no longer describes per-instance minute limits.
   - Docs: a cached call *usually* costs 1 unit; the anonymous daily limit is "up to 60/day; shared networks may get less"; llms.txt no longer hard-codes versions and notes that tool output is untrusted data, not instructions.
 
 - **Post-launch hardening (MCP SEC Security audit, issue #5):**
