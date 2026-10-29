@@ -22,6 +22,19 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 const rpcError = (status: number, code: number, message: string, data?: unknown, headers?: Record<string, string>) =>
   json(status, { jsonrpc: "2.0", id: null, error: { code, message, ...(data ? { data } : {}) } }, headers);
 
+/**
+ * The MCP transport answers with `text/event-stream` (no charset). SSE is UTF-8 by definition, but some
+ * clients and proxies decode a charset-less text type as Latin-1, garbling non-ASCII (e.g. "’" in filings).
+ * Re-wrap the (streaming) body with an explicit `charset=utf-8`; JSON responses are left alone.
+ */
+export function withUtf8Charset(res: Response): Response {
+  const ct = res.headers.get("content-type");
+  if (!ct || !/^text\/event-stream\b/i.test(ct) || /charset=/i.test(ct)) return res;
+  const headers = new Headers(res.headers);
+  headers.set("content-type", "text/event-stream; charset=utf-8");
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
+}
+
 /** Read a request body as text, refusing more than maxBytes. Returns null when too large. */
 export async function readBodyCapped(req: Request, maxBytes: number): Promise<string | null> {
   const len = Number(req.headers.get("content-length"));
@@ -143,6 +156,6 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
     });
     (forwarded as Request & { auth?: AuthInfo }).auth = auth;
     if (isInitialize) recordInitialize(principal, initClientInfo);
-    return base(forwarded);
+    return withUtf8Charset(await base(forwarded));
   };
 }

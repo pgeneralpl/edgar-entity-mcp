@@ -25,7 +25,7 @@ npx -y edgar-entity-mcp        # stdio MCP server
 | `search_company` | Ticker/name → CIK matches, fuzzy-ranked (share classes merged) | `company_tickers_exchange.json` |
 | `get_company_profile` | Name, tickers, exchanges, SIC + industry, state of incorporation, FYE, EIN, addresses, former names, latest 10-K/10-Q | `data.sec.gov/submissions` |
 | `list_filings` | Filings by form type + date range, with accession, dates, primary-document and index URLs; reads older history pages when needed | `data.sec.gov/submissions` |
-| `get_filing_document` | Primary document converted to clean text (tables kept as rows); 10-K/10-Q **item extraction** (1, 1A, 7, 7A, 8…); `max_chars`/`offset` paging | `www.sec.gov/Archives` |
+| `get_filing_document` | Primary document converted to clean text (tables kept as rows); **`mode: "outline"`** lists the 10-K/10-Q items with offsets and lengths and no text; 10-K/10-Q **item extraction** (1, 1A, 7, 7A, 8…); `max_chars` (default 10,000)/`offset` paging; by `url` also returns CIK, accession and index URL | `www.sec.gov/Archives` |
 | `get_financials` | Normalized revenue, gross profit, operating income, net income, EPS (basic/diluted), assets, liabilities, equity, cash, long-term debt, operating cash flow, capex, FCF, shares outstanding; annual or quarterly; deduped by fiscal period; reports the **tag used** | XBRL `companyfacts` |
 | `get_xbrl_concept` | Full history of any XBRL concept/unit for one company | XBRL `companyconcept` |
 | `compare_companies` | One concept across all filers for a calendar period (rank or filter by tickers) | XBRL `frames` |
@@ -36,6 +36,8 @@ npx -y edgar-entity-mcp        # stdio MCP server
 Also included: a `company_research_brief` **prompt** that runs the whole workflow, and an `edgar-entity://data-sources` **resource** (licenses).
 
 Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous name. Errors come back as `{"error":{"code","message","hint"}}` with `isError: true`. Ambiguous names return candidate CIKs.
+
+Every tool declares an `outputSchema`, and successful results carry the same JSON twice: as `structuredContent` (for clients that use structured output) and as a JSON text block (for clients that don't). The schemas are deliberately permissive (few required fields, nullable values, extra fields allowed) so an unusual upstream record never turns a good answer into a validation error. Error results have only the text block.
 
 ### Example calls and real outputs (live data, trimmed)
 
@@ -63,6 +65,17 @@ Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous n
       "acquired_disposed":"D","shares_owned_after":25972.25,"ownership":"D"}],
    "url":"https://www.sec.gov/Archives/edgar/data/1318605/000110465926106432/tm2625055d1_4seq1.xml"}],"has_more":true}
 ```
+
+**`get_filing_document`** outline first `{"url":"https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm","mode":"outline"}` (no text, ~2 KB for a 208k-character 10-K):
+```json
+{"url":"…/aapl-20250927.htm","cik":"0000320193","accession":"0000320193-25-000079","index_url":"…/0000320193-25-000079-index.htm",
+ "kind":"html","mode":"outline","total_chars":208531,
+ "outline":[{"id":"1","title":"Business","offset":8637,"chars":16040},{"id":"1A","title":"Risk Factors","offset":24677,"chars":68120},
+            {"id":"7","title":"Management's Discussion and Analysis (MD&A)","offset":104372,"chars":18232},
+            {"id":"8","title":"Financial Statements and Supplementary Data","offset":125643,"chars":62027}, "…"],
+ "hint":"Read an item with section: '<id>', or page through it with offset = the item's offset and max_chars ≤ its chars."}
+```
+then read only the item you need, 10,000 characters at a time by default (`offset` is relative to the section when `section` is set, else to the whole document):
 
 **`get_filing_document`** `{"url":"https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm","section":"1A","max_chars":3000}`
 ```json

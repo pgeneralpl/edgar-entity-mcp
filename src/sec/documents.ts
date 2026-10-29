@@ -100,7 +100,7 @@ export function normalizeSectionId(s: string): string {
  * Extract an item section. Filings repeat headings in the table of contents, so
  * we consider every occurrence and keep the longest span (the real section).
  */
-export function extractSection(text: string, section: string): { text: string; start: number } | undefined {
+export function extractSection(text: string, section: string): { text: string; start: number; end: number } | undefined {
   const want = normalizeSectionId(section);
   const hs = findHeadings(text);
   let best: { start: number; end: number } | undefined;
@@ -117,7 +117,54 @@ export function extractSection(text: string, section: string): { text: string; s
     if (!best || end - start > best.end - best.start) best = { start, end };
   }
   if (!best) return undefined;
-  return { text: text.slice(best.start, best.end).trim(), start: best.start };
+  return { text: text.slice(best.start, best.end).trim(), start: best.start, end: best.end };
+}
+
+export interface OutlineItem {
+  id: string;
+  title?: string;
+  /** Start of the item in the full text (usable as get_filing_document offset). */
+  offset: number;
+  /** Length of the item in characters (the span extractSection returns for this id). */
+  chars: number;
+}
+
+const TITLES_10K: Record<string, string> = { "1": "Business", "2": "Properties", "3": "Legal Proceedings", "4": "Mine Safety Disclosures", "6": "[Reserved]" };
+/** 10-Q items 1–4 are Part I (Part II repeats the ids; the longer, usually Part I, span is the one kept). */
+const TITLES_10Q: Record<string, string> = {
+  "1": "Financial Statements",
+  "2": "Management's Discussion and Analysis (MD&A)",
+  "3": "Quantitative and Qualitative Disclosures About Market Risk",
+  "4": "Controls and Procedures",
+  "5": "Other Information",
+  "6": "Exhibits",
+};
+
+/** "10-K" / "10-Q" from a form type, else from the cover page ("FORM 10-K"), else undefined. */
+export function detectForm(text: string, form?: string): "10-K" | "10-Q" | undefined {
+  const f = (form ?? "").toUpperCase();
+  if (/^10-?K/.test(f)) return "10-K";
+  if (/^10-?Q/.test(f)) return "10-Q";
+  const m = /\bFORM[\s\u00a0]+10-?([KQ])\b/i.exec(text.slice(0, 5000));
+  return m ? (m[1]!.toUpperCase() === "K" ? "10-K" : "10-Q") : undefined;
+}
+
+/** Item title for the form when known (10-K and 10-Q share ids 1–6 with different meanings). */
+export function sectionTitle(id: string, form?: "10-K" | "10-Q"): string | undefined {
+  if (form === "10-Q" && TITLES_10Q[id]) return TITLES_10Q[id];
+  if (form === "10-K" && TITLES_10K[id]) return TITLES_10K[id];
+  return SECTION_TITLES[id];
+}
+
+/** Each detected item once, in document order, with the same span extractSection would pick. */
+export function outlineSections(text: string, form?: string): OutlineItem[] {
+  const out: OutlineItem[] = [];
+  const f = detectForm(text, form);
+  for (const id of listSections(text)) {
+    const sec = extractSection(text, id);
+    if (sec) out.push({ id, title: sectionTitle(id, f), offset: sec.start, chars: sec.end - sec.start });
+  }
+  return out.sort((a, b) => a.offset - b.offset);
 }
 
 export function listSections(text: string): string[] {

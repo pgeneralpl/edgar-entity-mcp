@@ -27,6 +27,7 @@ export async function runTool(def: ToolDef, args: unknown, transport: Transport,
   const ev = { tool: def.name, transport, apiKey: principal?.tier === "key" ? auth?.token : undefined, clientId: auth?.clientId, principal, args };
   const t0 = Date.now();
   let text = "";
+  let structured: Record<string, unknown> | undefined;
   let ok = true;
   let errorCode: string | undefined;
   // One context for the whole call: quota reservation (beforeCall), upstream request count (run),
@@ -43,6 +44,8 @@ export async function runTool(def: ToolDef, args: unknown, transport: Transport,
       }
       const result = await def.run(args as never);
       text = JSON.stringify(result);
+      // structuredContent mirrors the JSON text exactly (round-tripped, so it is what the client parses).
+      if (def.outputSchema && result && typeof result === "object" && !Array.isArray(result)) structured = JSON.parse(text) as Record<string, unknown>;
     } catch (e) {
       const te = toToolError(e);
       ok = false;
@@ -57,7 +60,8 @@ export async function runTool(def: ToolDef, args: unknown, transport: Transport,
       }
     }
   });
-  return { content: [{ type: "text", text }], ...(ok ? {} : { isError: true }) };
+  // The JSON text content stays for clients that ignore structuredContent.
+  return { content: [{ type: "text", text }], ...(ok ? (structured ? { structuredContent: structured } : {}) : { isError: true }) };
 }
 
 /** Register all tools, prompts and resources on a server instance. Shared by stdio and HTTP. */
@@ -69,6 +73,7 @@ export function registerAll(server: McpServer, transport: Transport): void {
         title: def.title,
         description: def.description,
         inputSchema: def.inputSchema,
+        ...(def.outputSchema ? { outputSchema: def.outputSchema } : {}),
         annotations: { readOnlyHint: true, idempotentHint: true, openWorldHint: true, destructiveHint: false, title: def.title },
       },
       (async (args: unknown, ctx: ServerContext) => runTool(def, args, transport, ctx)) as never,
@@ -97,7 +102,7 @@ Steps:
 2. get_financials annual (limit 5) and quarterly (limit 4): revenue growth, margins, FCF, balance sheet; note tags_used caveats.
 3. list_filings forms ["10-K","10-Q","8-K"] limit 10; read get_filing_document section "1A" (top risks) and "7" (MD&A highlights) of the latest 10-K, paging only as needed.
 4. get_insider_trades limit 15: summarize open-market buys vs sales (codes P/S) and notable reporters.
-5. lookup_business_entity for the legal name in the state of incorporation/HQ if supported, to confirm status and registered agent.
+5. lookup_business_entity (supported: NY, CO, OR, CT, PA) for the legal name, to confirm status and registered agent: use the state of incorporation if supported, otherwise the HQ state if supported (a company incorporated elsewhere usually registers there as a foreign entity). Delaware and California registries are not available (no open data); do not guess, just note it as a data gap.
 Output: Overview, Financial snapshot (table), Key risks, Recent events, Insider activity, Entity facts, Sources (URLs). Flag data gaps explicitly.`,
           },
         },

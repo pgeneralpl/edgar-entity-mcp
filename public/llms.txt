@@ -13,7 +13,7 @@
 - search_company: find SEC registrants by name or ticker; returns CIK and tickers.
 - get_company_profile: EDGAR company profile (SIC/industry, addresses, fiscal year end, former names, latest 10-K/10-Q).
 - list_filings: list a company's SEC filings, filterable by form type (10-K, 10-Q, 8-K, ...) and date range.
-- get_filing_document: read the text of a filing document, with 10-K/10-Q item extraction and length-limited paging.
+- get_filing_document: read the text of a filing document, with an outline mode (items with offsets and lengths, no text), 10-K/10-Q item extraction and paging (10,000 characters per call by default).
 - get_financials: key financial metrics normalized from XBRL, one row per fiscal period, including derived free cash flow and the XBRL tag used.
 - get_xbrl_concept: history of a single XBRL concept for one company.
 - compare_companies: compare companies on one metric for a given period (XBRL frames).
