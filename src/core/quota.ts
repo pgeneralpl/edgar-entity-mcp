@@ -79,8 +79,11 @@ export function toolCost(tool: string, args: unknown): number {
     case "get_financials":
       return 2; // companyfacts is a large document
     case "compare_companies":
-      // frames responses cover every filer; metric mode downloads one frame per fallback tag (≤ 3)
-      return typeof a.metric === "string" ? 3 * Math.max(1, frameTagsFor(a.metric).length) : 3;
+      // Realistic maximum, reserved up front: one frame request per tag tried (metric mode: ≤ 3
+      // fallback tags; tag mode: 1) plus 1 for resolving `companies` (tickers file). Frames are
+      // capped at 256 KiB in Redis, so cached reads stay within the same count. Settlement
+      // (settleQuota) still refunds what a call did not use, e.g. when a company filter stops early.
+      return (typeof a.metric === "string" ? Math.max(1, frameTagsFor(a.metric).length) : 1) + 1;
     case "get_filing_document":
       // url: document + up to 3 redirects; company+accession adds tickers, submissions and up to 4 history pages
       return a.url ? 4 : 10;

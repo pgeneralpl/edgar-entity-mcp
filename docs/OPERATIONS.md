@@ -53,7 +53,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | `get_xbrl_concept` | 3 reserved, 1 charged when the tag is found directly (the reserve covers the `companyfacts` fallback for mis-cased or unknown tags) |
 | `list_filings` | 1 (6 with date filters or offset, which may page through up to 4 older-history files) |
 | `get_financials` | 2 |
-| `compare_companies` | 3 with `tag`; 3 × tags tried with `metric` (max 3 tags → 9; e.g. `revenue` / `net_income` 9 reserved, `gross_profit` 3), unused reservation refunded |
+| `compare_companies` | 1 per frame requested + 1 for resolving companies: 2 with `tag`; tags tried + 1 with `metric` (max 3 tags → 4; e.g. `revenue` / `net_income` 4 reserved, `gross_profit` 2), unused reservation refunded |
 | `get_filing_document` | 4 by `url`, 10 by `company` + `accession` |
 | `get_insider_trades` | 6 + `limit` (max 20 filings → 26) |
 | `lookup_business_entity` | number of states (max 5) |

@@ -8,7 +8,7 @@ import { resolveCompany, searchCompanies } from "./sec/tickers.js";
 import { buildProfile, getSubmissions, listFilings, findFiling } from "./sec/submissions.js";
 import { extractSection, fetchDocumentText, listSections, normalizeSectionId, SECTION_TITLES } from "./sec/documents.js";
 import { getFinancials, METRIC_KEYS } from "./sec/financials.js";
-import { DURATIONS, getConcept, getFrame, getMetricFrame } from "./sec/xbrl.js";
+import { CONCEPT_TAXONOMIES, DURATIONS, FRAME_TAXONOMIES, TAG_HINT, TAG_RE, getConcept, getFrame, getMetricFrame, normalizeFrameUnit, splitTag } from "./sec/xbrl.js";
 import { FRAME_METRIC_INPUTS, FRAME_METRIC_KEYS, METRIC_ALIASES, canonicalMetric } from "./sec/metricAliases.js";
 import { getInsiderTrades } from "./sec/insider.js";
 import { searchState, type MatchMode } from "./states/socrata.js";
@@ -203,9 +203,9 @@ export const getXbrlConcept = def({
       .string()
       .min(1)
       .max(200)
-      .regex(/^([a-z-]+:)?[A-Za-z_][A-Za-z0-9_.-]*$/, "Use an XBRL concept name like 'ResearchAndDevelopmentExpense' or 'us-gaap:Assets'")
+      .regex(TAG_RE, TAG_HINT)
       .describe("Concept name, e.g. 'ResearchAndDevelopmentExpense' (case is corrected if needed). 'us-gaap:Tag' form also accepted."),
-    taxonomy: z.enum(["us-gaap", "ifrs-full", "dei", "srt", "invest"]).default("us-gaap"),
+    taxonomy: z.enum(CONCEPT_TAXONOMIES).default("us-gaap"),
     unit: z.string().max(40).optional().describe("e.g. USD, shares, USD/shares, pure. Default: USD if present else first unit"),
     forms: z.array(z.string()).max(10).optional().describe("Only facts from these forms, e.g. ['10-K']"),
     framed_only: z.boolean().default(false),
@@ -217,9 +217,8 @@ export const getXbrlConcept = def({
   }),
   async run(a) {
     const c = await resolveCompany(a.company);
-    let taxonomy: string = a.taxonomy;
-    let tag = a.tag.trim();
-    if (tag.includes(":")) [taxonomy, tag] = tag.split(":", 2) as [string, string];
+    // The taxonomy prefix is checked against the enum too (e.g. abc:Assets is rejected).
+    const { taxonomy, tag } = splitTag(a.tag, a.taxonomy, CONCEPT_TAXONOMIES);
     const r = await getConcept({ cik: c.cik, taxonomy, tag, unit: a.unit, forms: a.forms, framedOnly: a.framed_only, duration: a.duration, limit: a.limit });
     // Labels/descriptions of custom (company-extension) concepts are filer-written.
     return compact({ ...cleanDeep(r), untrusted_fields: ["label", "description"] });
@@ -236,9 +235,15 @@ export const compareCompanies = def({
         .enum(FRAME_METRIC_INPUTS as [string, ...string[]])
         .optional()
         .describe("Normalized metric with tag fallback, e.g. 'revenue', 'net_income', 'eps_diluted', 'total_assets'. Use instead of tag."),
-      tag: z.string().min(1).max(200).optional().describe("Exact XBRL tag, e.g. 'Revenues', 'NetIncomeLoss', 'Assets' (case-sensitive). Use instead of metric."),
+      tag: z
+        .string()
+        .min(1)
+        .max(200)
+        .regex(TAG_RE, TAG_HINT)
+        .optional()
+        .describe("Exact XBRL tag, e.g. 'Revenues', 'NetIncomeLoss', 'Assets' (case-sensitive). Use instead of metric."),
       period: z.string().min(4).max(12).describe("CY2024, CY2024Q3, or CY2024Q4I"),
-      taxonomy: z.enum(["us-gaap", "ifrs-full", "dei", "srt"]).default("us-gaap").describe("For tag only"),
+      taxonomy: z.enum(FRAME_TAXONOMIES).default("us-gaap").describe("For tag only"),
       unit: z.string().max(40).optional().describe("USD (default), USD-per-shares, shares, pure. With metric, defaults to the metric's unit"),
       companies: z.array(z.string().min(1).max(200)).max(25).optional().describe("Tickers or CIKs to include (default: all)"),
       order: z.enum(["desc", "asc"]).default("desc"),
@@ -246,13 +251,13 @@ export const compareCompanies = def({
     })
     .refine((a) => (a.metric === undefined) !== (a.tag === undefined), { message: "Pass exactly one of metric or tag", path: ["metric"] }),
   async run(a) {
+    // Validate everything that becomes a frames URL path segment before any request.
+    const unit = a.unit === undefined ? undefined : normalizeFrameUnit(a.unit);
+    const ref = a.tag === undefined ? undefined : splitTag(a.tag, a.taxonomy, FRAME_TAXONOMIES);
     let ciks: string[] | undefined;
     if (a.companies?.length) ciks = await Promise.all(a.companies.map(async (x) => (await resolveCompany(x)).cik));
-    const unit = a.unit?.replace("/", "-per-");
     if (a.metric) return compact(await getMetricFrame({ metric: a.metric, period: a.period, unit, ciks, limit: a.limit, order: a.order }));
-    let taxonomy: string = a.taxonomy;
-    let tag = a.tag!.trim();
-    if (tag.includes(":")) [taxonomy, tag] = tag.split(":", 2) as [string, string];
+    const { taxonomy, tag } = ref!;
     return compact(await getFrame({ taxonomy, tag, unit: unit ?? "USD", period: a.period, ciks, limit: a.limit, order: a.order }));
   },
 });

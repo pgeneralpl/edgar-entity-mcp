@@ -7,11 +7,48 @@ import type { ConceptFacts, Fact } from "./xbrlTypes.js";
 import { getCompanyFacts, METRICS } from "./financials.js";
 import { FRAME_METRICS, canonicalMetric, frameTagsFor, knownTagCase } from "./metricAliases.js";
 
+/** Taxonomies accepted by get_xbrl_concept; compare_companies (frames) accepts all but `invest`. */
+export const CONCEPT_TAXONOMIES = ["us-gaap", "ifrs-full", "dei", "srt", "invest"] as const;
+export const FRAME_TAXONOMIES = ["us-gaap", "ifrs-full", "dei", "srt"] as const;
+/** XBRL concept name, optionally prefixed with a taxonomy (`us-gaap:Assets`). */
+export const TAG_RE = /^([a-z-]+:)?[A-Za-z_][A-Za-z0-9_.-]*$/;
+export const TAG_HINT = "Use an XBRL concept name like 'ResearchAndDevelopmentExpense' or 'us-gaap:Assets'";
+/** Frames unit path segment after '/' → '-per-' (USD, shares, USD-per-shares, pure). */
+export const UNIT_RE = /^[A-Za-z][A-Za-z0-9-]{0,39}$/;
+
+/**
+ * Split `taxonomy:Tag` (or a bare tag with the default taxonomy) and check the prefix against the
+ * tool's taxonomy list, so arbitrary text never becomes a URL path segment.
+ */
+export function splitTag(input: string, defaultTaxonomy: string, allowed: readonly string[]): { taxonomy: string; tag: string } {
+  const raw = input.trim();
+  if (!TAG_RE.test(raw)) throw new ToolError("INVALID_INPUT", `Invalid XBRL tag "${raw.slice(0, 80)}".`, TAG_HINT);
+  let taxonomy = defaultTaxonomy;
+  let tag = raw;
+  if (raw.includes(":")) [taxonomy, tag] = raw.split(":", 2) as [string, string];
+  if (!allowed.includes(taxonomy))
+    throw new ToolError("INVALID_INPUT", `Unknown taxonomy "${taxonomy}".`, `Use one of: ${allowed.join(", ")}.`);
+  return { taxonomy, tag };
+}
+
+/** Frames unit: accepts 'USD/shares' as 'USD-per-shares'; anything else outside UNIT_RE is rejected. */
+export function normalizeFrameUnit(unit: string): string {
+  const u = unit.trim().replace(/\//g, "-per-");
+  if (!UNIT_RE.test(u)) throw new ToolError("INVALID_INPUT", `Invalid unit "${unit.slice(0, 40)}".`, "Use a unit like USD, shares, USD-per-shares (or USD/shares) or pure.");
+  return u;
+}
+
+/** One URL path segment. encodeURIComponent keeps '.', so '.'/'..' (and empty) would change the path: refuse them. */
+function seg(v: string): string {
+  if (v === "" || v === "." || v === "..") throw new ToolError("INVALID_INPUT", `Invalid path segment "${v}" in an SEC API URL.`);
+  return encodeURIComponent(v);
+}
+
 export const conceptUrl = (cik: string, taxonomy: string, tag: string) =>
-  `https://data.sec.gov/api/xbrl/companyconcept/CIK${padCik(cik)}/${encodeURIComponent(taxonomy)}/${encodeURIComponent(tag)}.json`;
+  `https://data.sec.gov/api/xbrl/companyconcept/CIK${padCik(cik)}/${seg(taxonomy)}/${seg(tag)}.json`;
 
 export const frameUrl = (taxonomy: string, tag: string, unit: string, period: string) =>
-  `https://data.sec.gov/api/xbrl/frames/${encodeURIComponent(taxonomy)}/${encodeURIComponent(tag)}/${encodeURIComponent(unit)}/${encodeURIComponent(period)}.json`;
+  `https://data.sec.gov/api/xbrl/frames/${seg(taxonomy)}/${seg(tag)}/${seg(unit)}/${seg(period)}.json`;
 
 interface ConceptResponse extends ConceptFacts {
   cik: number;

@@ -84,11 +84,11 @@ describe("metric aliases", () => {
     expect(FRAME_METRIC_INPUTS).toContain("sales");
     expect(FRAME_METRIC_INPUTS).not.toContain("fcf"); // not a frames concept
   });
-  it("costs one frames download (3 units) per fallback tag", () => {
-    expect(toolCost("compare_companies", { metric: "revenue" })).toBe(9);
-    expect(toolCost("compare_companies", { metric: "sales" })).toBe(9);
-    expect(toolCost("compare_companies", { metric: "gross_profit" })).toBe(3);
-    expect(toolCost("compare_companies", { tag: "Revenues" })).toBe(3);
+  it("reserves one unit per frame request plus one for resolving companies", () => {
+    expect(toolCost("compare_companies", { metric: "revenue" })).toBe(4);
+    expect(toolCost("compare_companies", { metric: "sales" })).toBe(4);
+    expect(toolCost("compare_companies", { metric: "gross_profit" })).toBe(2);
+    expect(toolCost("compare_companies", { tag: "Revenues" })).toBe(2);
     expect(toolCost("get_xbrl_concept", { tag: "Revenues" })).toBe(3);
   });
 });
