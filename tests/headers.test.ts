@@ -15,7 +15,7 @@ function headersFor(path: string): Record<string, string> {
 }
 
 const HTML_PATHS = ["/", "/index", "/privacy", "/terms", "/abuse", "/index.html", "/privacy.html", "/terms.html", "/abuse.html"];
-const NON_HTML = ["/mcp", "/api/mcp", "/health", "/api/health", "/.well-known/mcp/server-card.json"];
+const NON_HTML = ["/mcp", "/api/mcp", "/health", "/api/health", "/.well-known/mcp/server-card.json", "/stats"];
 
 describe("vercel.json security headers", () => {
   it("sends nosniff, DENY and a strict Referrer-Policy everywhere, including /mcp and /health", () => {
@@ -42,7 +42,7 @@ describe("vercel.json security headers", () => {
       expect(h["content-security-policy"], p).toBeUndefined();
       expect(Object.keys(h).sort(), p).toEqual(["referrer-policy", "x-content-type-options", "x-frame-options"]);
     }
-    expect(vercel.rewrites.map((r) => r.source)).toEqual(["/mcp", "/health"]);
+    expect(vercel.rewrites.map((r) => r.source)).toEqual(["/mcp", "/health", "/stats"]);
   });
 
   it("the HTML pages work under that CSP: no scripts, external styles, forms, frames, images or <base>", () => {
