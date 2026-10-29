@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import type { ServerContext, CallToolResult } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { ALL_TOOLS, type ToolDef } from "./tools.js";
-import { ToolError, toToolError } from "./core/errors.js";
+import { ToolError, logError, toToolError } from "./core/errors.js";
 import type { Principal } from "./core/quota.js";
 import { getUsageHooks } from "./core/usage.js";
 import { runWithContext, type CallContext } from "./core/context.js";
@@ -45,7 +45,19 @@ export async function runTool(def: ToolDef, args: unknown, transport: Transport,
       const result = await def.run(args as never);
       text = JSON.stringify(result);
       // structuredContent mirrors the JSON text exactly (round-tripped, so it is what the client parses).
-      if (def.outputSchema && result && typeof result === "object" && !Array.isArray(result)) structured = JSON.parse(text) as Record<string, unknown>;
+      if (def.outputSchema && result && typeof result === "object" && !Array.isArray(result)) {
+        structured = JSON.parse(text) as Record<string, unknown>;
+        // The SDK rejects a result that does not match outputSchema with a protocol error. Check here
+        // instead, log which fields failed (paths and codes only, never values) and answer with a
+        // normal tool error that carries a reference id.
+        const v = def.outputSchema.safeParse(structured);
+        if (!v.success) {
+          structured = undefined;
+          const where = v.error.issues.slice(0, 10).map((i) => `${i.path.join(".") || "(root)"}:${i.code}`).join(", ");
+          const id = logError("output-schema", new Error(`${def.name} result does not match its output schema at ${where}`));
+          throw new ToolError("INTERNAL", `The ${def.name} result did not match its declared output schema (ref ${id}).`, "This is a server bug; retry with other arguments or report the ref.");
+        }
+      }
     } catch (e) {
       const te = toToolError(e);
       ok = false;
@@ -54,7 +66,8 @@ export async function runTool(def: ToolDef, args: unknown, transport: Transport,
     }
     if (hooks.afterCall) {
       try {
-        await hooks.afterCall({ ...ev, ok, ms: Date.now() - t0, errorCode, responseChars: text.length });
+        // structuredContent is the same JSON as the text content, so a structured result is sent twice.
+        await hooks.afterCall({ ...ev, ok, ms: Date.now() - t0, errorCode, responseChars: text.length * (structured ? 2 : 1) });
       } catch {
         /* never fail a call because of metering */
       }

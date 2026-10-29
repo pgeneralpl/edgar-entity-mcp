@@ -28,7 +28,7 @@ export interface UsageResult extends UsageEvent {
   ok: boolean;
   ms: number;
   errorCode?: string;
-  /** Approximate response size; handy for per-token pricing. */
+  /** Approximate response size in characters: the JSON text, counted twice when the same JSON is also sent as structuredContent. */
   responseChars: number;
 }
 

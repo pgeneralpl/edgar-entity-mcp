@@ -97,25 +97,34 @@ export function normalizeSectionId(s: string): string {
 }
 
 /**
+ * Longest span per item id, in one pass over the headings: a span runs from a heading to the next
+ * heading of a different item (or the end of the text). Filings repeat headings in the table of
+ * contents, so every occurrence is considered and the longest span (the real section) wins; ties keep
+ * the first. `keep` limits which ids are collected.
+ */
+function bestSpans(hs: Heading[], textLength: number, keep: (id: string) => boolean): Map<string, { start: number; end: number }> {
+  // nextDiff[i]: index of the first heading after i whose item differs from hs[i]'s (hs.length if none).
+  const nextDiff = new Array<number>(hs.length);
+  for (let i = hs.length - 1; i >= 0; i--) nextDiff[i] = i + 1 < hs.length && hs[i + 1]!.item === hs[i]!.item ? nextDiff[i + 1]! : i + 1;
+  const best = new Map<string, { start: number; end: number }>();
+  for (let i = 0; i < hs.length; i++) {
+    const id = hs[i]!.item;
+    if (!keep(id)) continue;
+    const start = hs[i]!.pos;
+    const end = nextDiff[i]! < hs.length ? hs[nextDiff[i]!]!.pos : textLength;
+    const cur = best.get(id);
+    if (!cur || end - start > cur.end - cur.start) best.set(id, { start, end });
+  }
+  return best;
+}
+
+/**
  * Extract an item section. Filings repeat headings in the table of contents, so
  * we consider every occurrence and keep the longest span (the real section).
  */
 export function extractSection(text: string, section: string): { text: string; start: number; end: number } | undefined {
   const want = normalizeSectionId(section);
-  const hs = findHeadings(text);
-  let best: { start: number; end: number } | undefined;
-  for (let i = 0; i < hs.length; i++) {
-    if (hs[i]!.item !== want) continue;
-    const start = hs[i]!.pos;
-    let end = text.length;
-    for (let j = i + 1; j < hs.length; j++) {
-      if (hs[j]!.item !== want) {
-        end = hs[j]!.pos;
-        break;
-      }
-    }
-    if (!best || end - start > best.end - best.start) best = { start, end };
-  }
+  const best = bestSpans(findHeadings(text), text.length, (id) => id === want).get(want);
   if (!best) return undefined;
   return { text: text.slice(best.start, best.end).trim(), start: best.start, end: best.end };
 }
@@ -156,13 +165,22 @@ export function sectionTitle(id: string, form?: "10-K" | "10-Q"): string | undef
   return SECTION_TITLES[id];
 }
 
-/** Each detected item once, in document order, with the same span extractSection would pick. */
+/** Item ids an outline reports (10-K/10-Q items); other "Item NN" matches are ignored. */
+const OUTLINE_IDS = new Set(Object.keys(SECTION_TITLES));
+/** Upper bound on outline entries (there are fewer known ids; kept as a guard). */
+export const OUTLINE_MAX_ITEMS = 30;
+
+/**
+ * Each known item once, in document order, with the same span extractSection would pick.
+ * One scan of the text and one pass over the headings (not one full extraction per item).
+ */
 export function outlineSections(text: string, form?: string): OutlineItem[] {
-  const out: OutlineItem[] = [];
   const f = detectForm(text, form);
-  for (const id of listSections(text)) {
-    const sec = extractSection(text, id);
-    if (sec) out.push({ id, title: sectionTitle(id, f), offset: sec.start, chars: sec.end - sec.start });
+  const spans = bestSpans(findHeadings(text), text.length, (id) => OUTLINE_IDS.has(id));
+  const out: OutlineItem[] = [];
+  for (const [id, sp] of spans) {
+    if (out.length >= OUTLINE_MAX_ITEMS) break;
+    out.push({ id, title: sectionTitle(id, f), offset: sp.start, chars: sp.end - sp.start });
   }
   return out.sort((a, b) => a.offset - b.offset);
 }
