@@ -144,7 +144,7 @@ The node server binds `127.0.0.1` by default and only answers requests whose `Ho
 
 ### Deploy to Vercel
 
-The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions with a Web-standard handler built on [`mcp-handler`](https://www.npmjs.com/package/mcp-handler)) and `vercel.json`, which runs `npm run build` and rewrites `/mcp` to `/api/mcp` and `/health` to `/api/health`. `npm run smoke:remote -- https://<project>.vercel.app/mcp` runs a live check against a deployment.
+The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions with a Web-standard handler built on [`mcp-handler`](https://www.npmjs.com/package/mcp-handler)) and `vercel.json`, which runs `npm run build` and rewrites `/mcp` to `/api/mcp` and `/health` to `/api/health`. It also sets `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: no-referrer` on every response, and a strict `Content-Security-Policy` (`default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`) on the static HTML pages only (`/`, `/privacy`, `/terms`, `/abuse`), not on `/mcp` or `/health`. `npm run smoke:remote -- https://<project>.vercel.app/mcp` runs a live check against a deployment.
 
 1. `vercel link` then `vercel env add SEC_USER_AGENT` (plus `HEALTH_SECRET`, `IP_HASH_SALT`, optionally `SOCRATA_APP_TOKEN` / `MCP_API_KEYS`).
 2. Strongly recommended: add the **Upstash Redis** integration. The cache, the SEC/state rate budgets and the per-client quotas then become fleet-wide; without it they are per instance. Keep **eviction off** in the Upstash console and enable usage alerts: the cache bounds itself (see [Redis memory budget](#redis-memory-budget)).
@@ -163,7 +163,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `SOCRATA_APP_TOKEN` | – | App token for the state portals (higher throttling limits; free at each portal's developer settings) |
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | – | Enables Redis (Vercel's `KV_REST_API_URL`/`KV_REST_API_TOKEN` also work). Without them cache and quotas are in-memory. |
 | `QUOTA_ANON_PER_MINUTE` / `QUOTA_ANON_PER_DAY` | `30` / `60` | HTTP quota for anonymous clients, in units, per hashed IP (per-minute limits are enforced per instance, in memory) |
-| `QUOTA_ANON_NETWORK_PER_DAY` | 10% of the global cap (`60`) | Shared daily cap for all anonymous clients in one /24 (IPv6 /48), against address rotation; never more than 10% of `QUOTA_ANON_GLOBAL_PER_DAY` |
+| `QUOTA_ANON_NETWORK_PER_DAY` | 4× `QUOTA_ANON_PER_DAY`, at most 10% of the global cap (`min(240, 60)` = `60`) | Shared daily cap for all anonymous clients in one /24 (IPv6 /48), against address rotation; never more than 10% of `QUOTA_ANON_GLOBAL_PER_DAY` (with the defaults that ceiling is the lower value; the 4× default applies from a global cap of 2,400) |
 | `QUOTA_ANON_GLOBAL_PER_DAY` / `QUOTA_ANON_GLOBAL_HARD_PER_DAY` / `QUOTA_ANON_TRICKLE_PER_DAY` | `600` / `900` / `10` | Soft daily cap for **all** anonymous clients together; past it each IP still gets the trickle allowance, up to the hard ceiling. API-key callers are not affected. |
 | `QUOTA_KEY_PER_MINUTE` / `QUOTA_KEY_PER_DAY` | `120` / `500` | HTTP quota per API key (per-key overrides via `scripts/create-key.ts`) |
 | `SEC_KEYED_RESERVED_RPS` | `2` | Part of `SEC_MAX_RPS` reserved for API-key callers (anonymous traffic shares the rest) |
@@ -175,7 +175,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `IP_HASH_SALT` | – (**required with Redis**) | Secret (≥32 random chars, e.g. `openssl rand -hex 32`) for the IP hash. The salt actually used is `HMAC-SHA256(IP_HASH_SALT, UTC date)`, so it rotates daily. With Redis configured and this missing, set to the old default `edgar-entity-mcp`, or shorter than 32 chars, the server refuses to start (node: exit 1; Vercel: every request gets 503 and `/health` says `misconfigured`). |
 | `API_KEY_SECRET` | – (**required with Redis**) | Secret (≥32 random chars, different from `IP_HASH_SALT`) used to sign API keys (`eem_<id>_<HMAC>`). Rotating it invalidates every minted key at once. Without Redis, minted keys are disabled. |
 | `REVOKED_KEY_IDS` | – | Comma-separated key ids (or full keys) refused immediately on every instance, without Redis — use for urgent revocation, including during degraded mode |
-| `HEALTH_SECRET` | – | Enables `/health?deep=1` (Redis ping) for requests sending `x-health-secret: <value>` |
+| `HEALTH_SECRET` | – | Enables `/health?deep=1` (Node.js version and patch state, Redis ping, write-budget state) for requests sending `x-health-secret: <value>`; any other `?deep=1` request (or every one while unset) gets HTTP 401 |
 | `SUPPRESSION_FILE` | – | JSON array of suppression entries (see [Privacy](#privacy-and-personal-data)) |
 | `MAX_BODY_BYTES` / `MAX_DOCUMENT_BYTES` | 65536 / 15 MB | HTTP request body cap / max filing document size |
 | `USAGE_LOG` | – | `1` logs per-call usage JSON (tool, latency, ok, response size, hashed principal) to stderr |
@@ -201,7 +201,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | Client | Per minute | Per day (UTC) |
 |---|---|---|
 | Anonymous (per IP, IPv6 per /64) | 30 (per instance) | 60 |
-| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 60 (10% of the global cap) |
+| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 60 (4× the per-IP cap = 240, capped at 10% of the global cap) |
 | All anonymous clients together | – | 600 soft; then 10 per IP, up to 900 hard |
 | Free API key | 120 (per instance) | 500 |
 
@@ -296,7 +296,7 @@ The Upstash database runs with **eviction off**. Upstash has a single eviction p
 - **"redis full"**: if a cache write still gets a capacity error (`ERR DB capacity quota exceeded`, `OOM command not allowed`), that instance stops **only cache writes** for 10 minutes (`/health` → `redis_cache.writes: "redis full"`). Quota counters, the quota script, API keys and suppression are unaffected and keep their fail-closed / degraded handling. Plan request limits (`max requests limit`) and outages still trigger degraded mode as before.
 - Non-cache data is tiny: daily counters (a few bytes each, 25 h TTL), token buckets, API key records and the suppression set.
 
-`/health` shows `redis_cache: { writes: "on" | "redis full" | "disabled", write_budget_bytes_per_utc_day, max_value_bytes, … }` (no traffic volumes). Whether today's write budget is exhausted (a usage signal) is shown only with `?deep=1` and `x-health-secret: <HEALTH_SECRET>`, as `redis_write_budget: { state, until, known_used_bytes }`.
+`/health` shows `redis_cache: { writes: "on" | "redis full" | "disabled", write_budget_bytes_per_utc_day, max_value_bytes, … }` (no traffic volumes). Whether today's write budget is exhausted (a usage signal) is shown only with `?deep=1` and `x-health-secret: <HEALTH_SECRET>`, as `redis_write_budget: { state, until, known_used_bytes }`, together with `node_version` and `node_runtime_patched` (the runtime version is not in the public `/health`). `?deep=1` without a valid secret returns HTTP 401 and no health data.
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 
@@ -338,7 +338,7 @@ Set these in the Vercel project (Production and Preview) before taking the deplo
 | `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` (or Vercel's `KV_REST_API_URL` + `KV_REST_API_TOKEN`) | the Upstash database |
 | `IP_HASH_SALT` | ≥ 32 random chars (`openssl rand -hex 32`) |
 | `API_KEY_SECRET` | ≥ 32 random chars, different from `IP_HASH_SALT` |
-| `HEALTH_SECRET` | random; enables `/health?deep=1` |
+| `HEALTH_SECRET` | random; enables `/health?deep=1` (401 without it) |
 | `SOCRATA_APP_TOKEN` | free app token from the state portals (higher throttling limits) |
 | `KEY_REQUEST_URL` | where users request a free key (default: GitHub issue link) |
 | `DEGRADED_SEC_RPS` | `0.2` (or `0` to stop SEC calls entirely while Redis is out) |

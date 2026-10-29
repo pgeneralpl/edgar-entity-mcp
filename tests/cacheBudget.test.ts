@@ -382,8 +382,9 @@ describe("review fixes: concurrency, counter TTL, gzip guard, health privacy, re
     const pub = healthPayload(env).redis_cache as Record<string, unknown>;
     expect(pub.writes).toBe("on");
     expect(JSON.stringify(pub)).not.toMatch(/exhaust|known_used/);
-    const anonBody = await (await healthResponse(new Request("https://x/health?deep=1"), env)).json();
-    expect(JSON.stringify(anonBody)).not.toMatch(/exhaust|redis_write_budget/);
+    const anonRes = await healthResponse(new Request("https://x/health?deep=1"), env);
+    expect(anonRes.status).toBe(401);
+    expect(await anonRes.text()).not.toMatch(/exhaust|redis_write_budget/);
     const priv = await (await healthResponse(new Request("https://x/health?deep=1", { headers: { "x-health-secret": "health-secret-0123456789" } }), env)).json();
     expect(priv.redis_write_budget.state).toBe("exhausted");
     expect(priv.redis_write_budget.until).toBe("2026-10-30T00:00:00.000Z");
