@@ -80,8 +80,6 @@ Feedback and state requests welcome 🙏
 
 ## Indie Hackers post
 
-> **Superseded, do not post.** This draft describes a business model (paid tiers, API keys) that does not match the project: a free hobby beta with low limits, no paid plans and no API keys offered. Kept for history only.
-
 **Title:** I built a vertical MCP server for US company research. Here's the plan to monetize it
 
 **Body:**
