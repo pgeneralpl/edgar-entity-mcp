@@ -49,7 +49,7 @@ export interface Config {
   degradedSecRps: number;
   /** Max concurrent upstream fetches per client (per instance). */
   maxConcurrentUpstreamPerClient: number;
-  /** Where users can request a free API key (shown in RATE_LIMITED hints). */
+  /** Where users ask for higher limits (shown in RATE_LIMITED / 401 hints). Default HIGHER_LIMITS_ISSUE_URL; KEY_REQUEST_URL overrides it for self-hosters. */
   keyRequestUrl: string;
   /** Shared secret for /health?deep=1 (header x-health-secret). Unset = deep checks disabled. */
   healthSecret?: string;
@@ -61,6 +61,12 @@ export interface Config {
   maxDocumentBytes: number;
   suppressionFile?: string;
 }
+
+/** GitHub issue form for higher-limit requests; the single link shown in RATE_LIMITED / 401 hints. */
+export const HIGHER_LIMITS_ISSUE_URL = "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml";
+
+/** Hint suffix inviting callers who hit a limit to open a higher-limits issue. */
+export const higherLimitsHint = (url: string = HIGHER_LIMITS_ISSUE_URL): string => `Need higher limits? Open an issue: ${url}`;
 
 export const DEFAULT_SEC_USER_AGENT = `${PACKAGE_NAME}/${VERSION} contact@example.com`;
 
@@ -125,7 +131,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     secKeyedReservedRps: Math.min(num(env.SEC_KEYED_RESERVED_RPS, 2), Math.max(0, Math.min(num(env.SEC_MAX_RPS, 6), 8) - 1)),
     degradedSecRps: Math.min(num0(env.DEGRADED_SEC_RPS, 0.2), 2),
     maxConcurrentUpstreamPerClient: num(env.MAX_CONCURRENT_UPSTREAM_PER_CLIENT, 4),
-    keyRequestUrl: env.KEY_REQUEST_URL?.trim() || "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request",
+    keyRequestUrl: env.KEY_REQUEST_URL?.trim() || HIGHER_LIMITS_ISSUE_URL,
     healthSecret: env.HEALTH_SECRET?.trim() || undefined,
     // Stats are written only by production on Vercel (preview deployments share the env's Redis) or
     // when self-hosting (no VERCEL env var); STATS_ENABLED=0/false/off/no turns them off everywhere.

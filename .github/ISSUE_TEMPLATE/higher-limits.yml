@@ -1,0 +1,32 @@
+name: Higher limits request
+description: Ask for higher limits on the hosted endpoint (edgar-entity-mcp.vercel.app).
+title: "Higher limits request: "
+labels: ["higher-limits"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for using edgar-entity-mcp! Tell us briefly what you need; this helps us plan capacity.
+        **This issue is public. Do not include personal data or secrets** (no emails, phone numbers, API keys, tokens or IP addresses).
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: What are you building or researching, and which tools do you call most?
+      placeholder: e.g. an agent that screens 10-K risk factors for a portfolio of ~200 companies
+    validations:
+      required: true
+  - type: input
+    id: calls_per_day
+    attributes:
+      label: Approximate calls per day
+      placeholder: e.g. 500
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client / agent used (optional)
+      placeholder: e.g. Claude Desktop, Cursor, custom agent
+    validations:
+      required: false

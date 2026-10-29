@@ -108,7 +108,7 @@ try {
   const err = (b.data.error ?? b.data) as { code?: string; retry_after_seconds?: number; hint?: string; details?: { retry_after_seconds?: number } };
   console.log("  sample:", snip(b.data, 400));
   const retry = err.retry_after_seconds ?? err.details?.retry_after_seconds;
-  check(b.isError && err.code === "RATE_LIMITED" && typeof retry === "number" && retry >= 1 && /API key/i.test(JSON.stringify(b.data)), `over budget -> RATE_LIMITED, retry after ${retry}s (>= 1), key hint`);
+  check(b.isError && err.code === "RATE_LIMITED" && typeof retry === "number" && retry >= 1 && /issues\/new\?template=higher-limits\.yml/.test(JSON.stringify(b.data)), `over budget -> RATE_LIMITED, retry after ${retry}s (>= 1), higher-limits issue hint`);
   await client.close();
 } finally {
   srv.kill();
