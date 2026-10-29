@@ -65,7 +65,7 @@ describe("config defaults", () => {
     const c = loadConfig({});
     expect(c.redisMaxValueBytes).toBe(256 * 1024);
     expect(c.cacheWriteBudgetBytes).toBe(64 * 1024 * 1024);
-    // Fixed 250 MB plan (250e6 bytes): two days' budget (00:00-01:00 UTC worst case) + 1 MB for
+    // Example 250 MB Redis store: two days' budget (00:00-01:00 UTC worst case) + 1 MB for
     // counters, keys and suppression must leave >= 40 % headroom.
     expect(2 * c.cacheWriteBudgetBytes + 1e6).toBeLessThan(0.6 * 250e6);
     expect(loadConfig({ CACHE_WRITE_BUDGET_BYTES: "1000" }).cacheWriteBudgetBytes).toBe(1000);

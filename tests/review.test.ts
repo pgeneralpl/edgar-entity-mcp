@@ -37,6 +37,14 @@ describe("M-a: org-vs-individual defaults to individual", () => {
       expect(looksLikeOrganization(n)).toBe(true);
     },
   );
+  it.each(["SMITH JOHN L P", "AARON BANK", "GARCIA MARIA N A", "GARCIA MARIA N.A.", "SMITH JOHN L", "JOHN DOE BANK", "MARY BANK N A", "DOE J. L."])(
+    "stricter heuristic: %s → individual (fail closed)",
+    (n) => expect(looksLikeOrganization(n)).toBe(false),
+  );
+  it.each(["CT CORPORATION SYSTEM", "CORPORATION SERVICE COMPANY", "JPMORGAN CHASE BANK, N.A.", "JPMORGAN CHASE BANK NA", "REGISTERED AGENTS INC", "XYZ HOLDINGS L.P.", "XYZ HOLDINGS LP", "Bar L.L.C.", "Foo L L C", "Wells Fargo Bank, N.A.", "First National Bank", "Citizens Bank"])(
+    "stricter heuristic: %s → organization",
+    (n) => expect(looksLikeOrganization(n)).toBe(true),
+  );
   it("Colorado/Oregon 'organization name' columns holding a person's name are treated as individuals", () => {
     const r = STATE_SOURCES.CO!.normalize([{ entityid: "1", entityname: "Acme LLC", agentorganizationname: "JOHN CHURCH" }], (id) => id);
     expect(r[0]!.registered_agent!.kind).toBe("individual");
@@ -92,7 +100,7 @@ describe("Security follow-up to #8 (M3): no natural-person agent details on the 
       const j = JSON.stringify(r);
       expect(j).not.toMatch(/Jane|Doe|Home Rd/);
       expect(j).toContain('"withheld":true');
-      expect(String((r as { privacy?: string }).privacy)).toMatch(/never returns natural-person agent details/);
+      expect(String((r as { privacy?: string }).privacy)).toMatch(/not available on this server/);
     }
     // Even with no call context (defensive) and over stdio on Vercel: never.
     cfg({ VERCEL: "1" });
@@ -134,11 +142,36 @@ describe("Security follow-up to #8 (M3): no natural-person agent details on the 
     expect(JSON.stringify(off)).not.toMatch(/Jane|Home Rd/);
   });
 
+  it.each([{ VERCEL_ENV: "production" }, { VERCEL_ENV: "preview" }, { VERCEL_REGION: "fra1" }, { VERCEL: "1" }])(
+    "onVercel when any of VERCEL / VERCEL_ENV / VERCEL_REGION is set (%o) -> person details refused even with the flag",
+    async (env) => {
+      stub(row);
+      const c = loadConfig({ SEC_USER_AGENT: "Test Co test@example.org", ALLOW_PERSON_AGENT_DETAILS: "1", ...env });
+      expect(c.onVercel).toBe(true);
+      expect(c.allowPersonAgentDetails).toBe(false);
+      resetConfig(c);
+      const r = await runWithContext(keyed, async () => lookupBusinessEntity.run(args as never));
+      expect(JSON.stringify(r)).not.toMatch(/Jane|Home Rd/);
+    },
+  );
+  it("blank VERCEL* values do not count as hosted", () => {
+    expect(loadConfig({ VERCEL: "", VERCEL_ENV: " ", VERCEL_REGION: "" }).onVercel).toBe(false);
+  });
+
+  it("self-hosted refusal note says 'this server', not 'hosted endpoint'", async () => {
+    stub(row);
+    cfg({});
+    const r = await runWithContext(keyed, async () => lookupBusinessEntity.run(args as never));
+    const note = String((r as { privacy?: string }).privacy);
+    expect(note).toMatch(/not available on this server/);
+    expect(note).not.toMatch(/hosted/);
+  });
+
   it("tool schema text does not promise person details on the hosted endpoint", () => {
     const d = String((lookupBusinessEntity.inputSchema as unknown as { shape: Record<string, { description?: string }> }).shape.include_agent_details!.description);
     expect(d).not.toMatch(/API key/);
     expect(d).toMatch(/Ignored on the hosted endpoint/);
-    expect(lookupBusinessEntity.description).toMatch(/always withheld on the hosted endpoint/);
+    expect(lookupBusinessEntity.description).toMatch(/withheld on the hosted endpoint; automated classification/);
   });
 });
 

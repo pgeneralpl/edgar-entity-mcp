@@ -89,6 +89,11 @@ export function isValidSecUserAgent(ua: string | undefined): boolean {
   return /[^\s@]+@[^\s@]+\.[^\s@]+/.test(ua);
 }
 
+/** Hosted on Vercel when any of VERCEL, VERCEL_ENV or VERCEL_REGION is set (fail closed for privacy). */
+export function isVercelEnv(env: NodeJS.ProcessEnv): boolean {
+  return [env.VERCEL, env.VERCEL_ENV, env.VERCEL_REGION].some((v) => !!v?.trim());
+}
+
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const ua = env.SEC_USER_AGENT?.trim();
   const anonGlobal = num(env.QUOTA_ANON_GLOBAL_PER_DAY, 600);
@@ -142,8 +147,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
     maxDocumentBytes: num(env.MAX_DOCUMENT_BYTES, 15 * 1024 * 1024),
     suppressionFile: env.SUPPRESSION_FILE?.trim() || undefined,
-    allowPersonAgentDetails: /^(1|true)$/i.test(env.ALLOW_PERSON_AGENT_DETAILS?.trim() ?? "") && !env.VERCEL,
-    onVercel: !!env.VERCEL,
+    allowPersonAgentDetails: /^(1|true)$/i.test(env.ALLOW_PERSON_AGENT_DETAILS?.trim() ?? "") && !isVercelEnv(env),
+    onVercel: isVercelEnv(env),
   };
 }
 

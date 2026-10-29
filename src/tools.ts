@@ -264,7 +264,7 @@ export const getInsiderTradesTool = def({
 export const lookupBusinessEntity = def({
   name: "lookup_business_entity",
   title: "State business-entity registry lookup",
-  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are always withheld on the hosted endpoint), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
+  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are withheld on the hosted endpoint; automated classification), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
   inputSchema: z.object({
     name: z.string().min(2).max(200).optional().describe("Entity name or fragment, e.g. 'Tiffany and Company'"),
     entity_id: z.string().min(1).max(40).optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
@@ -275,7 +275,7 @@ export const lookupBusinessEntity = def({
     include_agent_details: z
       .boolean()
       .default(false)
-      .describe("Local/self-hosted use only: include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Ignored on the hosted endpoint, which never returns them. Default false: only organizational agents are shown."),
+      .describe("Local/self-hosted use only: include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Ignored on the hosted endpoint, which always withholds them. Default false: only organizational agents are shown."),
   }),
   async run(a) {
     if (!a.name && !a.entity_id) throw new ToolError("INVALID_INPUT", "Provide name and/or entity_id.");
@@ -311,9 +311,9 @@ export const lookupBusinessEntity = def({
       notice: states.includes("CO") ? "CO data modified from its original source, the State of Colorado, which makes no warranty; see list_supported_states." : undefined,
       privacy:
         a.include_agent_details && !detailsAllowed
-          ? "include_agent_details is not available on this server (the hosted endpoint never returns natural-person agent details); individual agents and their related addresses were withheld."
+          ? "include_agent_details is not available on this server; individual (natural-person) agents and their related addresses were withheld (automated classification)."
           : withheld || JSON.stringify(results).includes('"addresses_withheld":true')
-            ? "Names/addresses of individual (natural-person) agents, and entity addresses where a related party is an individual, are withheld. They are never returned by the hosted endpoint."
+            ? "Names/addresses of individual (natural-person) agents, and entity addresses where a related party is an individual, are withheld (automated classification; ask the server operator to suppress any it misses)."
             : undefined,
       untrusted_fields: ["results[].name", "results[].location_name", "results[].principal_address", "results[].mailing_address", "results[].registered_agent", "results[].service_of_process"],
     });

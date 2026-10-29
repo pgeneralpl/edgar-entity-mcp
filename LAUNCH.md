@@ -37,7 +37,7 @@ Responses are compact JSON with source URLs. The server respects SEC fair-access
 **Tagline:** Research any US company from SEC EDGAR and state registries, with sources included.
 **Description:**
 Ten read-only tools for analysts, founders and researchers: `search_company`, `get_company_profile`, `list_filings`, `get_filing_document` (10-K item extraction), `get_financials` (normalized XBRL), `get_xbrl_concept`, `compare_companies` (SEC frames), `get_insider_trades` (Form 4), `lookup_business_entity` (NY/CO/OR/CT/PA) and `list_supported_states`. There is also a `company_research_brief` prompt. No data API keys are needed.
-**Config:** optional `x-api-key` header, if the hosted plan is enabled.
+**Config:** none needed for the hosted endpoint; set `SEC_USER_AGENT` when running locally.
 
 ## PulseMCP
 

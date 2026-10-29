@@ -37,14 +37,30 @@ export interface AgentInfo {
 type Row = Record<string, unknown>;
 
 /**
- * Conservative heuristic, defaulting to "individual" (withheld): a name counts as an organization
- * only if it ENDS with an unambiguous legal-form suffix, or matches a known commercial
- * registered-agent service. Ambiguous endings are treated as individuals on purpose:
- * "CO" ("DAVID CO"), "PA"/"PC" (professional associations of one person, and surnames), "LAW",
- * "CHURCH", "GROUP", "TRUST" (often a person's trust).
+ * Conservative heuristic, defaulting to "individual" (withheld). When in doubt, a name is treated
+ * as a person (fail closed). A name counts as an organization only if:
+ * - it matches a known commercial registered-agent service; or
+ * - it ends with a punctuated single-letter entity suffix ("L.P.", "L.L.C.", "N.A." …) preceded
+ *   by a real word ("N.A." additionally needs BANK/TRUST in the name); or
+ * - it does NOT end in one or two single-letter tokens (initials: "SMITH JOHN L P",
+ *   "GARCIA MARIA N A" are people) and ends with an unambiguous legal-form suffix; or
+ * - it ends with a weak word such as "BANK" and also contains another organization word
+ *   ("FIRST NATIONAL BANK" yes, "AARON BANK" no).
+ * Ambiguous endings are treated as individuals on purpose: "CO" ("DAVID CO"), "PA"/"PC"
+ * (professional associations of one person, and surnames), "LAW", "CHURCH", "GROUP", "TRUST".
+ * The classification is automated and can miss; the suppression list covers the rest.
  */
 const ORG_SUFFIX_RE =
-  /(?:^|\s)(INC|INCORPORATED|CORP|CORPORATION|LLC|L L C|LLP|L L P|LLLP|PLLC|P L L C|LP|L P|LTD|LIMITED|COMPANY|(?:&|AND) CO|BANK|N A|ASSOCIATION|FOUNDATION|UNIVERSITY)$/;
+  /(?:^|\s)(INC|INCORPORATED|CORP|CORPORATION|LLC|L L C|LLP|L L P|LLLP|L L L P|PLLC|P L L C|LP|LTD|LIMITED|COMPANY|(?:&|AND) CO|ASSOCIATION|FOUNDATION|UNIVERSITY)$/;
+/** Words that are also surnames; they mark an organization only together with another org word. */
+const WEAK_ORG_END_RE = /(?:^|\s)BANK(?: NA)?$/;
+const ORG_WORD_RE =
+  /\b(?:NATIONAL|FEDERAL|SAVINGS|TRUST|FIRST|CITIZENS|COMMUNITY|STATE|UNITED|AMERICAN?|FINANCIAL|COMMERCE|COMMERCIAL|MERCHANTS|CREDIT|UNION|PEOPLES|FARMERS|SECURITY|CAPITAL|CHASE|HOLDINGS|BANCORP|CORPORATE)\b/;
+/** Punctuated single-letter suffix at the end ("L.P.", "N.A.", "L.L.C."), preceded by a word of 2+ letters. */
+const PUNCT_SUFFIX_RE = /([A-Za-z]{2,})[\s,]+((?:[A-Za-z]\.\s?){2,})$/;
+const PUNCT_ENTITY_SUFFIXES = new Set(["LP", "LLC", "LLP", "LLLP", "PLLC", "NA"]);
+/** Exactly one or two single-letter tokens at the end, after a longer token. */
+const TRAILING_INITIALS_RE = /(?:^|\s)\S{2,}(?: [A-Z]){1,2}$/;
 const KNOWN_AGENT_SERVICES_RE =
   /^(?:THE )?(?:C ?T CORPORATION SYSTEM|CORPORATION SERVICE COMPANY|CSC[- ]LAWYERS INCORPORATING SERVICE|NATIONAL REGISTERED AGENTS|NORTHWEST REGISTERED AGENT|REGISTERED AGENTS? (?:INC|LEGAL SERVICES|SOLUTIONS)|COGENCY GLOBAL|INCORP SERVICES|UNITED STATES CORPORATION AGENTS|CORPORATION TRUST COMPANY|LEGALINC CORPORATE SERVICES|BUSINESS FILINGS INCORPORATED|HARBOR COMPLIANCE|CAPITOL SERVICES|A REGISTERED AGENT)\b/;
 
@@ -60,7 +76,21 @@ export function normalizeName(name: string): string {
 export function looksLikeOrganization(name: string | undefined): boolean {
   if (!name) return false;
   const n = normalizeName(name);
-  return ORG_SUFFIX_RE.test(n) || KNOWN_AGENT_SERVICES_RE.test(n);
+  if (KNOWN_AGENT_SERVICES_RE.test(n)) return true;
+  const raw = name.trim();
+  const m = PUNCT_SUFFIX_RE.exec(raw);
+  if (m) {
+    const suffix = m[2]!.replace(/[.\s]/g, "").toUpperCase();
+    if (PUNCT_ENTITY_SUFFIXES.has(suffix)) {
+      if (suffix !== "NA") return true;
+      return /\b(?:BANK|TRUST)\b/.test(normalizeName(raw.slice(0, m.index + m[1]!.length)));
+    }
+  }
+  // Ends in one or two initials ("L P", "N A"): a person unless proven otherwise above.
+  if (TRAILING_INITIALS_RE.test(n)) return false;
+  if (ORG_SUFFIX_RE.test(n)) return true;
+  if (WEAK_ORG_END_RE.test(n)) return ORG_WORD_RE.test(n.replace(WEAK_ORG_END_RE, ""));
+  return false;
 }
 
 /** Build an AgentInfo, classifying it when the source does not say. */
