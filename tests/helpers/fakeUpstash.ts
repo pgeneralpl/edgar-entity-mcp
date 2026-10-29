@@ -91,19 +91,20 @@ export function fakeUpstash() {
   const hashes = new Map<string, Map<string, number>>();
   const hlls = new Map<string, Set<string>>();
   const zsets = new Map<string, Map<string, number>>();
-  const ttls = new Map<string, number>();
+  /** Absolute EXPIREAT (unix seconds) set by the stats flush script, per key. */
+  const expireAts = new Map<string, number>();
   /** JS port of STATS_FLUSH_SCRIPT in src/core/stats.ts (same semantics and same inner commands). */
   const statsFlushScript = (keys: string[], args: string[]): unknown => {
     const [c, u, cl] = keys as [string, string, string];
-    const [ttl, cap, nm, nc] = args.slice(0, 4).map(Number) as [number, number, number, number];
+    const [exp, cap, nm, nc] = args.slice(0, 4).map(Number) as [number, number, number, number];
     let i = 4;
     if (nm > 0) {
       inner("PFADD");
       const set = hlls.get(u) ?? new Set<string>();
       args.slice(i, i + nm).forEach((m) => set.add(m));
       hlls.set(u, set);
-      inner("EXPIRE");
-      ttls.set(u, ttl);
+      inner("EXPIREAT");
+      expireAts.set(u, exp);
     }
     i += nm;
     if (nc > 0) {
@@ -119,8 +120,8 @@ export function fakeUpstash() {
         asc.slice(0, z.size - cap).forEach(([k]) => z.delete(k));
       }
       zsets.set(cl, z);
-      inner("EXPIRE");
-      ttls.set(cl, ttl);
+      inner("EXPIREAT");
+      expireAts.set(cl, exp);
     }
     i += 2 * nc;
     if (i < args.length) {
@@ -130,8 +131,8 @@ export function fakeUpstash() {
         h.set(args[j]!, (h.get(args[j]!) ?? 0) + Number(args[j + 1]));
       }
       hashes.set(c, h);
-      inner("EXPIRE");
-      ttls.set(c, ttl);
+      inner("EXPIREAT");
+      expireAts.set(c, exp);
     }
     return 1;
   };
@@ -258,6 +259,6 @@ export function fakeUpstash() {
     const status = !isBatch && "error" in out ? 400 : 200;
     return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
   });
-  return { commands, kv, fetchStub, state, billed, internal, hashes, hlls, zsets, ttls };
+  return { commands, kv, fetchStub, state, billed, internal, hashes, hlls, zsets, expireAts };
 }
 

@@ -127,7 +127,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxConcurrentUpstreamPerClient: num(env.MAX_CONCURRENT_UPSTREAM_PER_CLIENT, 4),
     keyRequestUrl: env.KEY_REQUEST_URL?.trim() || "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request",
     healthSecret: env.HEALTH_SECRET?.trim() || undefined,
-    statsEnabled: !/^(0|false|off|no)$/i.test(env.STATS_ENABLED?.trim() ?? ""),
+    // Stats are written only by production on Vercel (preview deployments share the env's Redis) or
+    // when self-hosting (no VERCEL env var); STATS_ENABLED=0/false/off/no turns them off everywhere.
+    statsEnabled: !/^(0|false|off|no)$/i.test(env.STATS_ENABLED?.trim() ?? "") && (!env.VERCEL || env.VERCEL_ENV === "production"),
     statsSecret: (env.STATS_SECRET?.trim().length ?? 0) >= 32 ? env.STATS_SECRET!.trim() : undefined,
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
     maxDocumentBytes: num(env.MAX_DOCUMENT_BYTES, 15 * 1024 * 1024),

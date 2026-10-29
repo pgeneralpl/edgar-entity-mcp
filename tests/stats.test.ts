@@ -24,8 +24,11 @@ import {
   statsPending,
   STATS_FLUSH_INTERVAL_MS,
   STATS_MAX_PENDING_MEMBERS,
-  STATS_TOP_CLIENTS,
-  STATS_TTL_SECONDS,
+  STATS_RETENTION_DAYS,
+  STATS_CLIENT_LABELS,
+  dayEndMs,
+  saltTtlSeconds,
+  statsExpireAt,
 } from "../src/core/stats.js";
 import { statsResponse } from "../src/http/stats.js";
 import { createHttpHandler } from "../src/http/handler.js";
@@ -108,8 +111,10 @@ describe("aggregation", () => {
       "lat:50": 1,
     });
     expect(f.hlls.get(k.u)?.size).toBe(2); // one IP principal + one key principal
-    expect(f.ttls.get(k.c)).toBe(STATS_TTL_SECONDS);
-    expect(f.ttls.get(k.u)).toBe(STATS_TTL_SECONDS);
+    // Absolute expiry: end of the UTC day + 30 days (EXPIREAT, so every write leaves a TTL).
+    expect(f.expireAts.get(k.c)).toBe(statsExpireAt(DAY));
+    expect(f.expireAts.get(k.u)).toBe(statsExpireAt(DAY));
+    expect(statsExpireAt(DAY)).toBe(Date.UTC(2026, 9, 30) / 1000 + STATS_RETENTION_DAYS * 86400);
     // Second flush of the day: salt is memoised, so exactly one EVALSHA (+ inner commands).
     const top = f.commands.slice(-1);
     expect(String(top[0]?.[0]).toLowerCase()).toBe("evalsha");
@@ -129,32 +134,94 @@ describe("aggregation", () => {
     expect(dump).not.toContain("RAWKEYID1234");
     const salt = f.kv.get(statsKeys(DAY).salt);
     expect(salt?.v).toMatch(/^[0-9a-f]{64}$/);
-    expect(salt!.ttl!).toBeLessThanOrEqual(13 * 3600 + 60); // 12 h to UTC midnight + 1 h
+    expect(salt!.ttl!).toBe(13 * 3600); // T0 is 12:00 UTC: 12 h to the end of the day + 1 h
     for (const m of f.hlls.get(statsKeys(DAY).u)!) expect(m).toMatch(/^[0-9a-f]{16}$/);
   });
 
-  it("records initialize sessions and normalized client names in a capped ZSET", async () => {
-    recordInitialize(undefined, { name: "Claude Desktop <me@example.com>", version: "1.2.3; rm -rf" }, T0);
+  it("records a client label only after the principal's first successful call, once per principal per day", async () => {
+    const p = ipPrincipal("203.0.113.7");
+    recordInitialize(p, { name: "Cursor", version: "1.7.2" }, T0);
     await settle();
-    expect(f.zsets.get(statsKeys(DAY).cl)?.get("Claude Desktop me.example.com/1.2.3 rm -rf")).toBeUndefined();
-    const z = [...f.zsets.get(statsKeys(DAY).cl)!.keys()];
-    expect(z).toHaveLength(1);
-    expect(z[0]).not.toContain("@");
-    expect(z[0]!.length).toBeLessThanOrEqual(64);
     expect(f.hashes.get(statsKeys(DAY).c)?.get("init")).toBe(1);
-    // More distinct clients than the cap: Redis keeps only the top STATS_TOP_CLIENTS.
-    for (let i = 0; i < STATS_TOP_CLIENTS + 30; i++) recordInitialize(undefined, { name: `client${i}`, version: "1" }, T0 + 1);
+    expect(f.zsets.get(statsKeys(DAY).cl)).toBeUndefined(); // initialize alone records no label
+    recordToolCall(call({ principal: p, ok: false, errorCode: "NOT_FOUND" }), T0 + 1);
     await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
     await settle();
-    expect(f.zsets.get(statsKeys(DAY).cl)!.size).toBeLessThanOrEqual(STATS_TOP_CLIENTS);
+    expect(f.zsets.get(statsKeys(DAY).cl)).toBeUndefined(); // nor does a failed call
+    for (let i = 0; i < 5; i++) {
+      recordInitialize(p, { name: "Cursor", version: "1.7.2" }, Date.now());
+      recordToolCall(call({ principal: p }), Date.now());
+    }
+    recordToolCall(call({ principal: ipPrincipal("203.0.113.99") }), Date.now()); // no initialize seen: no label
+    await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(Object.fromEntries(f.zsets.get(statsKeys(DAY).cl)!)).toEqual({ "cursor/1": 1 });
+    // Next UTC day: the same principal counts again (once).
+    const next = T0 + 86400_000;
+    vi.setSystemTime(next);
+    recordToolCall(call({ principal: p }), next);
+    recordToolCall(call({ principal: p }), next + 1);
+    await settle();
+    await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(Object.fromEntries(f.zsets.get(statsKeys(isoDay(next)).cl)!)).toEqual({ "cursor/1": 1 });
   });
 
-  it("normalizeClient: safe charset, 64 chars, unknown when empty", () => {
-    expect(normalizeClient({ name: "cursor", version: "1.7.0" })).toBe("cursor/1.7.0");
-    expect(normalizeClient({})).toBe("unknown");
-    expect(normalizeClient(null)).toBe("unknown");
-    expect(normalizeClient({ name: "a@b.c\u0000<script>", version: 5 })).toBe("ab.cscript");
-    expect(normalizeClient({ name: "x".repeat(200), version: "y".repeat(200) }).length).toBe(64);
+  it("clientInfo poisoning: free text never reaches Redis, unknown names become 'other' and cannot inflate counts", async () => {
+    const evil = [
+      "john.doe@example.com",
+      "Cursor <script>alert(1)</script>",
+      "cursor evil payload",
+      "Claude\u0000Desktop; DROP TABLE",
+      "x".repeat(10_000),
+      "Ｃｕｒｓｏｒ-tracking-id-123456",
+      "visit https://spam.example",
+    ];
+    evil.forEach((name, i) => {
+      const p = ipPrincipal(`198.51.100.${i + 1}`);
+      recordInitialize(p, { name, version: `${i}.0; ${name}` }, T0);
+      for (let j = 0; j < 20; j++) recordToolCall(call({ principal: p }), T0 + j); // repeat calls: counted once
+    });
+    await settle();
+    await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(Object.fromEntries(f.zsets.get(statsKeys(DAY).cl)!)).toEqual({ other: evil.length });
+    const dump = JSON.stringify(f.commands);
+    for (const s of ["john.doe", "example.com", "script", "evil", "DROP", "xxxxxxxxxx", "tracking", "spam"]) expect(dump).not.toContain(s);
+    // Every label that can be written comes from the fixed allowlist.
+    for (const k of f.zsets.get(statsKeys(DAY).cl)!.keys()) expect(STATS_CLIENT_LABELS).toContain(k.split("/")[0]);
+  });
+
+  it("normalizeClient: allowlisted labels with the major version only, everything else 'other'", () => {
+    const cases: [unknown, string][] = [
+      [{ name: "claude-ai", version: "0.1.0" }, "claude/0"],
+      [{ name: "Claude Desktop", version: "1.2.3" }, "claude/1"],
+      [{ name: "claude-code", version: "2.0.14" }, "claude-code/2"],
+      [{ name: "cursor-vscode", version: "1.0.0" }, "cursor/1"],
+      [{ name: "Visual Studio Code - Insiders", version: "1.105.0-insider" }, "vscode/1"],
+      [{ name: "GitHub Copilot" }, "vscode"],
+      [{ name: "mcp-inspector", version: "0.17.0" }, "mcp-inspector/0"],
+      [{ name: "Windsurf" }, "windsurf"],
+      [{ name: "Zed", version: "v0.200.1" }, "zed/0"],
+      [{ name: "continue-client" }, "continue"],
+      [{ name: "Cline", version: "3" }, "cline/3"],
+      [{ name: "goose" }, "goose"],
+      [{ name: "openai-mcp", version: "1.0.0" }, "openai/1"],
+      [{ name: "ChatGPT" }, "openai"],
+      [{ name: "gemini-cli-mcp-client", version: "0.1.0" }, "gemini/0"],
+      [{ name: "@librechat/api-client" }, "librechat"],
+      [{ name: "n8n-mcp-client" }, "n8n"],
+      [{ name: "mcp-remote", version: "0.1.29" }, "mcp-remote/0"],
+      [{ name: "cursor", version: "1.2; DROP" }, "cursor/1"],
+      [{ name: "cursor", version: "abc" }, "cursor"],
+      [{ name: "cursor", version: "123456" }, "cursor"],
+      [{ name: "john.doe@example.com", version: "1" }, "other"],
+      [{ name: "cursor evil" }, "other"],
+      [{ name: 42 }, "other"],
+      [{}, "other"],
+      [null, "other"],
+    ];
+    for (const [info, want] of cases) expect(normalizeClient(info), JSON.stringify(info)).toBe(want);
   });
 
   it("ignores stdio calls and does nothing when STATS_ENABLED=0", async () => {
@@ -184,8 +251,8 @@ describe("bounds and cost", () => {
   });
 
   it("keeps at most 3 Redis keys per day (+1 salt) and bounded hash fields", async () => {
-    for (let i = 0; i < 100; i++) recordToolCall(call({ tool: `Bad Tool ${i}`, ok: false, errorCode: `CODE_${i}` }), T0);
-    recordInitialize(undefined, { name: "c" }, T0);
+    recordInitialize(ipPrincipal("203.0.113.7"), { name: "evil-client-name" }, T0);
+    for (let i = 0; i < 100; i++) recordToolCall(call({ tool: `Bad Tool ${i}`, ok: i > 0, errorCode: `CODE_${i}` }), T0);
     await settle();
     await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
     await settle();
@@ -206,6 +273,91 @@ describe("bounds and cost", () => {
     await settle();
     expect(f.hashes.has(statsKeys(DAY).c)).toBe(true);
     expect(f.hashes.has(statsKeys(isoDay(next)).c)).toBe(true);
+  });
+});
+
+describe("daily salt lifecycle (B2)", () => {
+  it("salt TTL is end(D) + 1 h − now", () => {
+    expect(saltTtlSeconds(DAY, T0)).toBe(13 * 3600);
+    expect(saltTtlSeconds(DAY, dayEndMs(DAY) - 1000)).toBe(3601);
+    expect(saltTtlSeconds(DAY, dayEndMs(DAY) + 1800_000)).toBe(1800);
+    expect(saltTtlSeconds(DAY, dayEndMs(DAY) + 3600_000)).toBe(0);
+    expect(saltTtlSeconds(DAY, dayEndMs(DAY) + 7200_000)).toBeLessThan(0);
+  });
+
+  it("a salt created just after midnight for the previous day lives only until 01:00 UTC", async () => {
+    const end = dayEndMs(DAY);
+    vi.setSystemTime(end - 10_000);
+    f.state.failWith = "ERR down"; // first flush fails, so day D stays pending past midnight
+    recordToolCall(call(), end - 10_000);
+    await settle();
+    f.state.failWith = undefined;
+    recordToolCall(call({ principal: ipPrincipal("203.0.113.8") }), end - 5_000);
+    vi.setSystemTime(end + 1800_000);
+    await flushStats(end + 1800_000); // 00:30 UTC next day
+    expect(f.kv.get(statsKeys(DAY).salt)?.ttl).toBe(1800);
+    expect(f.hlls.get(statsKeys(DAY).u)?.size).toBe(1);
+  });
+
+  it("after end(D) + 1 h no salt is created or used and no HLL member is written for D; counters still are", async () => {
+    const end = dayEndMs(DAY);
+    vi.setSystemTime(end - 10_000);
+    f.state.failWith = "ERR down";
+    recordToolCall(call(), end - 10_000);
+    await settle();
+    f.state.failWith = undefined;
+    recordToolCall(call({ principal: ipPrincipal("203.0.113.8") }), end - 5_000);
+    vi.setSystemTime(end + 3601_000);
+    const n = f.commands.length;
+    await flushStats(end + 3601_000);
+    expect(f.kv.has(statsKeys(DAY).salt)).toBe(false);
+    expect(f.hlls.has(statsKeys(DAY).u)).toBe(false);
+    expect(f.commands.slice(n).some((c) => String(c[0]).toLowerCase() === "evalsha" && c.includes(statsKeys(DAY).salt))).toBe(false);
+    expect(f.hashes.get(statsKeys(DAY).c)?.get("calls:search_company")).toBe(1);
+    expect(f.hashes.get(statsKeys(DAY).c)?.get("flush_fail")).toBe(1);
+  });
+
+  it("an in-memory salt is never used after end(D) + 1 h, and older salts are dropped on every flush", async () => {
+    recordToolCall(call(), T0);
+    await settle();
+    expect(statsPending().saltDays).toEqual([DAY]);
+    const end = dayEndMs(DAY);
+    // Pending D data flushed after the grace: memoised salt is not used.
+    vi.setSystemTime(end - 1000);
+    recordToolCall(call({ principal: ipPrincipal("203.0.113.50") }), end - 1000); // trailing (within the interval)
+    await flushStats(end + 3700_000);
+    expect(f.hlls.get(statsKeys(DAY).u)?.size).toBe(1);
+    expect(statsPending().saltDays).toEqual([]);
+    // Next day: today's salt is created, yesterday's is gone from memory.
+    const next = end + 4000_000;
+    vi.setSystemTime(next + STATS_FLUSH_INTERVAL_MS);
+    recordToolCall(call(), next + STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(statsPending().saltDays).toEqual([isoDay(next)]);
+  });
+});
+
+describe("environment gating (B4)", () => {
+  it("records only in Vercel production or when self-hosted; STATS_ENABLED=false always wins", () => {
+    expect(loadConfig({ ...ENV, VERCEL: "1", VERCEL_ENV: "production" }).statsEnabled).toBe(true);
+    expect(loadConfig({ ...ENV, VERCEL: "1", VERCEL_ENV: "preview" }).statsEnabled).toBe(false);
+    expect(loadConfig({ ...ENV, VERCEL: "1", VERCEL_ENV: "development" }).statsEnabled).toBe(false);
+    expect(loadConfig({ ...ENV, VERCEL: "1" }).statsEnabled).toBe(false);
+    expect(loadConfig(ENV).statsEnabled).toBe(true); // self-hosted
+    expect(loadConfig({ ...ENV, STATS_ENABLED: "false" }).statsEnabled).toBe(false);
+    expect(loadConfig({ ...ENV, VERCEL: "1", VERCEL_ENV: "production", STATS_ENABLED: "0" }).statsEnabled).toBe(false);
+  });
+
+  it("a preview deployment sends no stats commands", async () => {
+    resetStats();
+    resetConfig(loadConfig({ ...ENV, VERCEL: "1", VERCEL_ENV: "preview" }));
+    recordInitialize(ipPrincipal("203.0.113.7"), { name: "cursor" }, T0);
+    recordToolCall(call(), T0);
+    await settle();
+    await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(statsPending().days).toBe(0);
+    expect(f.billed.n).toBe(0);
   });
 });
 
@@ -269,24 +421,30 @@ describe("failure tolerance", () => {
 
 describe("GET /stats", () => {
   async function seed() {
+    recordInitialize(ipPrincipal("203.0.113.7"), { name: "cursor", version: "1.0" }, T0);
     recordToolCall(call({ ms: 40 }), T0);
     recordToolCall(call({ ms: 40, principal: ipPrincipal("203.0.113.8") }), T0);
     recordToolCall(call({ ms: 3000, ok: false, errorCode: "UPSTREAM_ERROR" }), T0);
-    recordInitialize(ipPrincipal("203.0.113.7"), { name: "cursor", version: "1.0" }, T0);
     await settle();
     await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
     await settle();
   }
 
-  it("is disabled (404) when STATS_SECRET is unset or too short, 401 on a wrong or missing secret", async () => {
-    expect((await statsResponse(statsReq(), { ...ENV, STATS_SECRET: "" } as NodeJS.ProcessEnv)).status).toBe(404);
-    expect((await statsResponse(statsReq("", "short"), { ...ENV, STATS_SECRET: "short" } as NodeJS.ProcessEnv)).status).toBe(404);
-    const wrong = await statsResponse(statsReq("", SECRET + "x"), ENV as NodeJS.ProcessEnv);
-    expect(wrong.status).toBe(401);
-    const body = (await wrong.json()) as Record<string, unknown>;
-    expect(body.error).toBe("unauthorized");
-    expect(body.totals).toBeUndefined();
-    expect((await statsResponse(statsReq("", null), ENV as NodeJS.ProcessEnv)).status).toBe(401);
+  it("answers 404 when STATS_SECRET is unset or too short and on a wrong or missing secret (endpoint not revealed)", async () => {
+    const bodies: string[] = [];
+    for (const [req, env] of [
+      [statsReq(), { ...ENV, STATS_SECRET: "" }],
+      [statsReq("", "short"), { ...ENV, STATS_SECRET: "short" }],
+      [statsReq("", SECRET + "x"), ENV],
+      [statsReq("", SECRET.slice(0, -1)), ENV],
+      [statsReq("", null), ENV],
+    ] as [Request, NodeJS.ProcessEnv][]) {
+      const res = await statsResponse(req, env);
+      expect(res.status).toBe(404);
+      bodies.push(await res.text());
+    }
+    expect(new Set(bodies).size).toBe(1); // indistinguishable
+    expect(bodies[0]).not.toMatch(/secret|stats|unauthori/i);
     expect(f.billed.n).toBe(0); // refused requests never touch Redis
   });
 
@@ -313,7 +471,7 @@ describe("GET /stats", () => {
       error_codes: { UPSTREAM_ERROR: 1 },
       sessions: 1,
       unique_clients_approx: 2,
-      clients: [{ client: "cursor/1.0", sessions: 1 }],
+      clients: [{ client: "cursor/1", principals: 1 }],
       latency_ms: { p50: "<=50", p95: "<=5000" },
     });
     expect(j.days[1]).toMatchObject({ calls: 0, unique_clients_approx: 0 });
@@ -361,7 +519,7 @@ describe("HTTP handler integration", () => {
           body: JSON.stringify(body),
         }),
       ).then((r) => r.text());
-    await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test-client", version: "9.9" } } });
+    await post({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "Cursor", version: "1.7.2" } } });
     await post({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "search_company", arguments: { query: "AAPL" } } });
     await settle();
     await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
@@ -369,7 +527,7 @@ describe("HTTP handler integration", () => {
     const hsh = f.hashes.get(statsKeys(DAY).c)!;
     expect(hsh.get("init")).toBe(1);
     expect(hsh.get("calls:search_company")).toBe(1);
-    expect(f.zsets.get(statsKeys(DAY).cl)?.get("test-client/9.9")).toBe(1);
+    expect(Object.fromEntries(f.zsets.get(statsKeys(DAY).cl)!)).toEqual({ "cursor/1": 1 });
     expect(f.hlls.get(statsKeys(DAY).u)?.size).toBe(1); // same principal for both requests
   });
 });
@@ -377,10 +535,16 @@ describe("HTTP handler integration", () => {
 describe("docs", () => {
   it("privacy policy and README describe the stats", () => {
     const privacy = readFileSync(new URL("../public/privacy.html", import.meta.url), "utf8");
-    expect(privacy).toMatch(/90 days/);
+    expect(privacy).toMatch(/30 days/);
+    expect(privacy).not.toMatch(/90 days/);
+    expect(privacy).toMatch(/pseudonymous/);
+    expect(privacy).toMatch(/Once the daily secret is deleted/);
+    expect(privacy).toMatch(/never free-text/i);
     expect(privacy).toMatch(/aggregate/i);
     const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
     expect(readme).toMatch(/STATS_SECRET/);
     expect(readme).toMatch(/STATS_ENABLED/);
+    expect(readme).not.toMatch(/90-day|90 days/);
+    expect(readme).not.toMatch(/Production and Preview/);
   });
 });

@@ -65,6 +65,7 @@
     "smoke": "tsx scripts/smoke.ts",
     "smoke:e2e": "npm run build && tsx scripts/smoke.ts && tsx scripts/e2e-http.ts && tsx scripts/e2e-vercel-fn.ts",
     "check": "npm run typecheck && npm run lint && npm test",
+    "check:stats-redis": "tsx scripts/stats-redis-check.ts",
     "prepublishOnly": "npm run check && npm run build",
     "validate:registry": "tsx scripts/validate-server-json.ts",
     "gen": "tsx scripts/gen-artifacts.ts",

@@ -7,17 +7,19 @@ import type { Principal } from "./quota.js";
 import type { UsageResult } from "./usage.js";
 
 /**
- * Aggregate, non-identifying daily usage counters (STATS_ENABLED, default on; Redis only).
+ * Aggregate daily usage counters (STATS_ENABLED, default on; Redis only; on Vercel only when
+ * VERCEL_ENV=production, so preview deployments never write to the shared database).
  *
- * Per UTC day D (all keys expire 90 days after their last write, via a relative EXPIRE):
+ * Per UTC day D (every write sets EXPIREAT end(D) + STATS_RETENTION_DAYS, so keys always carry a TTL):
  *   stats:D:c   HASH  calls:<tool> ok:<tool> err:<tool>, ec:<ERROR_CODE>, tier:anon|key, init,
  *                     degraded, lat:<bucket ms>, flush_fail
  *   stats:D:u   HLL   approximate unique clients: HMAC(random daily salt, principal id), truncated
- *   stats:D:cl  ZSET  MCP clientInfo "name/version" from initialize, capped to the top STATS_TOP_CLIENTS
- *   stats:salt:D      the random daily salt itself; expires ~1 h after the UTC day ends, after which
- *                     nobody (not even the operator, with IP_HASH_SALT) can test whether a given
- *                     client is in that day's HLL.
- * At most 3 keys per day are kept (+1 salt key), i.e. ≤ 3 × 90 + 2 keys in total.
+ *   stats:D:cl  ZSET  allowlisted client-software label ("cursor/1", "claude", ..., else "other"),
+ *                     counted once per principal per day (per instance), after its first successful call
+ *   stats:salt:D      the random daily salt; expires at end(D) + 1 h. Until then the HLL members are
+ *                     pseudonymous (whoever holds the salt and a principal id can test membership);
+ *                     afterwards nobody can. No HLL member is added after end(D) + 1 h.
+ * At most 3 keys per day are kept (+1 salt key), i.e. ≤ 3 × 31 + 2 keys in total.
  *
  * Cost control: events are aggregated per instance in memory and written with ONE script call
  * (EVALSHA) per flush; an instance flushes at most once per STATS_FLUSH_INTERVAL_MS (the first
@@ -25,7 +27,9 @@ import type { UsageResult } from "./usage.js";
  * Writes are fire-and-forget with a short timeout: a stats failure never fails or slows a request,
  * never trips degraded mode, and simply drops that batch (counted as flush_fail when possible).
  */
-export const STATS_TTL_SECONDS = 90 * 86400;
+export const STATS_RETENTION_DAYS = 30;
+/** The daily salt lives until this long after the end of its UTC day. */
+export const STATS_SALT_GRACE_SECONDS = 3600;
 export const STATS_FLUSH_INTERVAL_MS = 60_000;
 export const STATS_TIMEOUT_MS = 1_500;
 export const STATS_TOP_CLIENTS = 50;
@@ -37,8 +41,9 @@ export const STATS_MAX_DAYS = 30;
  */
 export const STATS_MAX_PENDING_MEMBERS = 100;
 export const STATS_MAX_PENDING_CLIENTS = 20;
+/** Memory bounds for the per-instance "label once per principal per day" bookkeeping. */
+export const STATS_MAX_TRACKED_PRINCIPALS = 2_000;
 export const STATS_MAX_PENDING_DAYS = 2;
-export const STATS_CLIENT_MAX_CHARS = 64;
 /** Upper edges (ms) of the latency histogram buckets; anything slower lands in "inf". */
 export const LATENCY_BUCKETS_MS = [50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000] as const;
 const ERROR_BACKOFF_MS = 60_000;
@@ -56,28 +61,28 @@ const KNOWN_ERROR_CODES = new Set([
   "INTERNAL",
 ]);
 
-/** KEYS: c, u, cl. ARGV: ttl, cap, nMembers, nClients, members…, (client, count)…, (field, incr)… */
+/** KEYS: c, u, cl. ARGV: expireat (unix s), cap, nMembers, nClients, members…, (client, count)…, (field, incr)… */
 export const STATS_FLUSH_SCRIPT = `
-local ttl = tonumber(ARGV[1])
+local exp = tonumber(ARGV[1])
 local cap = tonumber(ARGV[2])
 local nm = tonumber(ARGV[3])
 local nc = tonumber(ARGV[4])
 local i = 5
 if nm > 0 then
   redis.call('PFADD', KEYS[2], unpack(ARGV, i, i + nm - 1))
-  redis.call('EXPIRE', KEYS[2], ttl)
+  redis.call('EXPIREAT', KEYS[2], exp)
 end
 i = i + nm
 if nc > 0 then
   for j = i, i + 2 * nc - 1, 2 do redis.call('ZINCRBY', KEYS[3], ARGV[j + 1], ARGV[j]) end
   local n = redis.call('ZCARD', KEYS[3])
   if n > cap then redis.call('ZREMRANGEBYRANK', KEYS[3], 0, n - cap - 1) end
-  redis.call('EXPIRE', KEYS[3], ttl)
+  redis.call('EXPIREAT', KEYS[3], exp)
 end
 i = i + 2 * nc
 if i <= #ARGV then
   for j = i, #ARGV, 2 do redis.call('HINCRBY', KEYS[1], ARGV[j], ARGV[j + 1]) end
-  redis.call('EXPIRE', KEYS[1], ttl)
+  redis.call('EXPIREAT', KEYS[1], exp)
 end
 return 1
 `;
@@ -110,6 +115,18 @@ export const STATS_READ_SCRIPT_SHA = createHash("sha1").update(STATS_READ_SCRIPT
 export function isoDay(now = Date.now()): string {
   return new Date(now).toISOString().slice(0, 10);
 }
+/** End of UTC day `day` (YYYY-MM-DD) in ms since the epoch. */
+export function dayEndMs(day: string): number {
+  return Date.parse(`${day}T00:00:00Z`) + 86400_000;
+}
+/** Absolute expiry (unix seconds) of a day's stats keys: end of the day + retention. */
+export function statsExpireAt(day: string): number {
+  return Math.floor(dayEndMs(day) / 1000) + STATS_RETENTION_DAYS * 86400;
+}
+/** Seconds until day D's salt must be gone (end(D) + 1 h − now); ≤ 0 means no more HLL writes for D. */
+export function saltTtlSeconds(day: string, now: number): number {
+  return Math.floor((dayEndMs(day) + STATS_SALT_GRACE_SECONDS * 1000 - now) / 1000);
+}
 export function statsKeys(day: string): { c: string; u: string; cl: string; salt: string } {
   const p = `${config().cachePrefix}stats:`;
   return { c: `${p}${day}:c`, u: `${p}${day}:u`, cl: `${p}${day}:cl`, salt: `${p}salt:${day}` };
@@ -127,22 +144,59 @@ function errorField(code: string | undefined): string {
 }
 
 /**
- * Client software label from MCP initialize clientInfo: "name/version", restricted to a safe
- * charset (letters, digits, . _ - + / space), collapsed, truncated to 64 chars; "unknown" if empty.
- * '@' and other punctuation are dropped so an e-mail address cannot be smuggled in verbatim.
+ * Allowlist of well-known MCP clients: label → accepted name stems. clientInfo.name is lowercased,
+ * NFKC-normalized and stripped to [a-z0-9]; it matches when it equals a stem, optionally followed
+ * by one generic suffix (CLIENT_SUFFIXES). Anything else is recorded as "other", so no free text
+ * supplied by a client ever reaches Redis.
+ */
+const KNOWN_CLIENTS: [label: string, stems: string[]][] = [
+  ["claude-code", ["claudecode"]],
+  ["claude", ["claude", "claudeai", "claudedesktop", "anthropic"]],
+  ["cursor", ["cursor", "cursorvscode"]],
+  ["vscode", ["vscode", "visualstudiocode", "visualstudiocodeinsiders", "githubcopilot", "copilot"]],
+  ["mcp-inspector", ["mcpinspector", "inspector", "modelcontextprotocolinspector"]],
+  ["windsurf", ["windsurf", "codeium"]],
+  ["zed", ["zed", "zedindustries"]],
+  ["continue", ["continue", "continuedev"]],
+  ["cline", ["cline"]],
+  ["roo-code", ["roocode", "roocline"]],
+  ["goose", ["goose"]],
+  ["openai", ["openai", "chatgpt", "codex", "openaicodex"]],
+  ["gemini", ["gemini", "geminicli", "googlegemini"]],
+  ["librechat", ["librechat", "librechatapi"]],
+  ["n8n", ["n8n"]],
+  ["mcp-remote", ["mcpremote"]],
+  ["jetbrains", ["jetbrains", "jetbrainsai", "junie"]],
+  ["amazon-q", ["amazonq", "qdeveloper"]],
+  ["lm-studio", ["lmstudio"]],
+  ["cherry-studio", ["cherrystudio"]],
+  ["5ire", ["5ire"]],
+  ["warp", ["warp"]],
+  ["postman", ["postman"]],
+  ["opencode", ["opencode"]],
+  ["fast-agent", ["fastagent"]],
+  ["mcp-use", ["mcpuse"]],
+  ["smithery", ["smithery"]],
+];
+const CLIENT_SUFFIXES = ["", "client", "mcpclient", "mcp", "cli", "climcpclient", "desktop", "app", "ide", "extension"];
+const CLIENT_LOOKUP = new Map<string, string>();
+for (const [label, stems] of KNOWN_CLIENTS)
+  for (const stem of stems) for (const suf of CLIENT_SUFFIXES) if (!CLIENT_LOOKUP.has(stem + suf)) CLIENT_LOOKUP.set(stem + suf, label);
+/** All labels that can ever be recorded (plus "other"). */
+export const STATS_CLIENT_LABELS: readonly string[] = [...KNOWN_CLIENTS.map(([l]) => l), "other"];
+
+/**
+ * Client-software label from MCP initialize clientInfo: an allowlisted label plus the major
+ * version when it is a plain number ("cursor/1", "claude"), or "other" for anything unknown.
  */
 export function normalizeClient(info: unknown): string {
   const o = info && typeof info === "object" ? (info as Record<string, unknown>) : {};
-  const clean = (v: unknown, max: number) =>
-    (typeof v === "string" ? v : "")
-      .normalize("NFKC")
-      .replace(/[^A-Za-z0-9._+\- ]+/g, "")
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, max);
-  const name = clean(o.name, 48) || "unknown";
-  const version = clean(o.version, 24);
-  return (version ? `${name}/${version}` : name).slice(0, STATS_CLIENT_MAX_CHARS);
+  const raw = typeof o.name === "string" ? o.name.slice(0, 200) : "";
+  const key = raw.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const label = CLIENT_LOOKUP.get(key);
+  if (!label) return "other";
+  const m = typeof o.version === "string" ? /^\s*v?(\d{1,4})(?:[.\s-]|$)/i.exec(o.version) : null;
+  return m ? `${label}/${Number(m[1])}` : label;
 }
 
 interface Delta {
@@ -159,10 +213,15 @@ interface State {
   backoffUntil: number;
   timer?: ReturnType<typeof setTimeout>;
   salts: Map<string, string>;
+  /** principal id → client label from its latest initialize on this instance (memory only). */
+  labels: Map<string, string>;
+  /** "day\0principal\0label" already counted on this instance (memory only, cleared daily). */
+  counted: Set<string>;
+  countedDay: string;
   failures: number;
   enabledOverride?: boolean;
 }
-const st: State = { pending: new Map(), lastFlushAt: 0, backoffUntil: 0, salts: new Map(), failures: 0 };
+const st: State = { pending: new Map(), lastFlushAt: 0, backoffUntil: 0, salts: new Map(), labels: new Map(), counted: new Set(), countedDay: "", failures: 0 };
 
 function enabled(): boolean {
   return st.enabledOverride ?? config().statsEnabled;
@@ -173,6 +232,9 @@ export function resetStats(opts: { enabled?: boolean } = {}): void {
   if (st.timer) clearTimeout(st.timer);
   st.pending.clear();
   st.salts.clear();
+  st.labels.clear();
+  st.counted.clear();
+  st.countedDay = "";
   st.inFlight = undefined;
   st.timer = undefined;
   st.lastFlushAt = 0;
@@ -211,22 +273,42 @@ export function recordToolCall(e: UsageResult, now = Date.now()): void {
     if (e.principal) inc(d, `tier:${e.principal.tier === "anon" ? "anon" : "key"}`);
     if (Number.isFinite(e.ms)) inc(d, `lat:${latencyBucket(e.ms)}`);
     addMember(d, e.principal);
+    if (e.ok && e.principal) countClientLabel(d, isoDay(now), e.principal.id);
     schedule(now);
   } catch {
     /* stats must never affect a request */
   }
 }
 
-/** An MCP initialize request (one session) from this principal with this clientInfo. */
+/** Count the principal's client label once per day, on (or after) its first successful tool call. */
+function countClientLabel(d: Delta, day: string, principalId: string): void {
+  const label = st.labels.get(principalId);
+  if (!label) return;
+  if (st.countedDay !== day) {
+    st.counted.clear();
+    st.countedDay = day;
+  }
+  const k = `${principalId}\0${label}`;
+  if (st.counted.has(k) || st.counted.size >= STATS_MAX_TRACKED_PRINCIPALS) return;
+  st.counted.add(k);
+  const slot = d.clients.has(label) || d.clients.size < STATS_MAX_PENDING_CLIENTS ? label : "other";
+  d.clients.set(slot, (d.clients.get(slot) ?? 0) + 1);
+}
+
+/**
+ * An MCP initialize request (one session). Counts the session and remembers the principal's
+ * allowlisted client label in memory; the label is only counted after a successful tool call.
+ */
 export function recordInitialize(principal: Principal | undefined, clientInfo: unknown, now = Date.now()): void {
   try {
     if (!enabled()) return;
     const d = delta(isoDay(now))!;
     inc(d, "init");
-    const label = normalizeClient(clientInfo);
-    if (d.clients.has(label) || d.clients.size < STATS_MAX_PENDING_CLIENTS) d.clients.set(label, (d.clients.get(label) ?? 0) + 1);
-    else d.clients.set("other", (d.clients.get("other") ?? 0) + 1);
-    addMember(d, principal);
+    if (principal) {
+      st.labels.delete(principal.id);
+      if (st.labels.size >= STATS_MAX_TRACKED_PRINCIPALS) st.labels.delete(st.labels.keys().next().value!);
+      st.labels.set(principal.id, normalizeClient(clientInfo));
+    }
     schedule(now);
   } catch {
     /* never affects a request */
@@ -303,32 +385,33 @@ async function runScript(redis: Redis, sha: string, script: string, keys: string
   }
 }
 
-function saltTtlSeconds(now: number): number {
-  const d = new Date(now);
-  const midnight = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1);
-  return Math.max(60, Math.ceil((midnight - now) / 1000) + 3600);
-}
-
-async function daySalt(redis: Redis, day: string, now: number): Promise<string> {
+async function daySalt(redis: Redis, day: string, now: number): Promise<string | undefined> {
+  const ttl = saltTtlSeconds(day, now);
+  if (ttl <= 0) {
+    st.salts.delete(day);
+    return undefined; // past end(D) + 1 h: the salt is (being) deleted, never write HLL members for D
+  }
   const cached = st.salts.get(day);
   if (cached) return cached;
-  const res = await runScript(redis, STATS_SALT_SCRIPT_SHA, STATS_SALT_SCRIPT, [statsKeys(day).salt], [
-    randomBytes(32).toString("hex"),
-    String(saltTtlSeconds(now)),
-  ]);
+  const res = await runScript(redis, STATS_SALT_SCRIPT_SHA, STATS_SALT_SCRIPT, [statsKeys(day).salt], [randomBytes(32).toString("hex"), String(ttl)]);
   const salt = String(res);
   if (salt.length < 16) throw new Error("bad stats salt");
-  for (const k of st.salts.keys()) if (k < day) st.salts.delete(k);
   st.salts.set(day, salt);
   return salt;
 }
 
+/** Forget in-memory salts of days before `today` (they are only needed during the 1 h grace). */
+function pruneSalts(now: number): void {
+  const today = isoDay(now);
+  for (const k of st.salts.keys()) if (k < today) st.salts.delete(k);
+}
+
 /** Build the flush script arguments for one day's delta (exported for tests). */
-export function flushArgs(d: Delta, salt: string | undefined): string[] {
+export function flushArgs(day: string, d: Delta, salt: string | undefined): string[] {
   const members = salt ? [...d.members].map((id) => createHmac("sha256", salt).update(id).digest("hex").slice(0, 16)) : [];
   const clients = [...d.clients].flatMap(([k, v]) => [k, String(v)]);
   const fields = [...d.fields].filter(([, v]) => v !== 0).flatMap(([k, v]) => [k, String(v)]);
-  return [String(STATS_TTL_SECONDS), String(STATS_TOP_CLIENTS), String(members.length), String(d.clients.size), ...members, ...clients, ...fields];
+  return [String(statsExpireAt(day)), String(STATS_TOP_CLIENTS), String(members.length), String(d.clients.size), ...members, ...clients, ...fields];
 }
 
 /**
@@ -336,6 +419,7 @@ export function flushArgs(d: Delta, salt: string | undefined): string[] {
  * day). Exported for tests; in production it is called by the scheduler only.
  */
 export async function flushStats(now = Date.now()): Promise<void> {
+  pruneSalts(now);
   if (!enabled() || !st.pending.size) return;
   const redis = getRedis();
   if (!redis) {
@@ -353,8 +437,9 @@ export async function flushStats(now = Date.now()): Promise<void> {
         st.failures = 0;
       }
       const salt = d.members.size ? await withTimeout(daySalt(redis, day, now), STATS_TIMEOUT_MS) : undefined;
+      if (!salt) d.members.clear();
       const k = statsKeys(day);
-      await withTimeout(runScript(redis, STATS_FLUSH_SCRIPT_SHA, STATS_FLUSH_SCRIPT, [k.c, k.u, k.cl], flushArgs(d, salt)), STATS_TIMEOUT_MS);
+      await withTimeout(runScript(redis, STATS_FLUSH_SCRIPT_SHA, STATS_FLUSH_SCRIPT, [k.c, k.u, k.cl], flushArgs(day, d, salt)), STATS_TIMEOUT_MS);
     } catch (e) {
       // Drop the batch (it may have been applied before a timeout; never double count) and back off.
       // Deliberately does not mark Redis degraded: stats are not worth disturbing quotas or caching.
@@ -366,7 +451,16 @@ export async function flushStats(now = Date.now()): Promise<void> {
 }
 
 /** Pending state, for tests and diagnostics. */
-export function statsPending(): { days: number; fields: number; members: number; clients: number; inFlight: boolean; scheduled: boolean } {
+export function statsPending(): {
+  days: number;
+  fields: number;
+  members: number;
+  clients: number;
+  inFlight: boolean;
+  scheduled: boolean;
+  saltDays: string[];
+  trackedPrincipals: number;
+} {
   let fields = 0;
   let members = 0;
   let clients = 0;
@@ -375,7 +469,16 @@ export function statsPending(): { days: number; fields: number; members: number;
     members += d.members.size;
     clients += d.clients.size;
   }
-  return { days: st.pending.size, fields, members, clients, inFlight: !!st.inFlight, scheduled: !!st.timer };
+  return {
+    days: st.pending.size,
+    fields,
+    members,
+    clients,
+    inFlight: !!st.inFlight,
+    scheduled: !!st.timer,
+    saltDays: [...st.salts.keys()],
+    trackedPrincipals: st.labels.size,
+  };
 }
 
 // ---------------------------------------------------------------- reading (GET /stats)
@@ -390,7 +493,8 @@ export interface DayStats {
   tiers: Record<string, number>;
   sessions: number;
   unique_clients_approx: number;
-  clients: { client: string; sessions: number }[];
+  /** Allowlisted client labels; count = principals seen with that label (once per principal per day per instance). */
+  clients: { client: string; principals: number }[];
   degraded_activations: number;
   latency_ms: { buckets: Record<string, number>; p50?: string; p95?: string };
   flush_failures: number;
@@ -431,7 +535,7 @@ export function parseDay(date: string, hash: unknown, unique: unknown, zset: unk
     tiers: {},
     sessions: 0,
     unique_clients_approx: Number(unique) || 0,
-    clients: pairs(zset).map(([client, n]) => ({ client, sessions: Number(n) || 0 })),
+    clients: pairs(zset).map(([client, n]) => ({ client, principals: Number(n) || 0 })),
     degraded_activations: 0,
     latency_ms: { buckets: {} },
     flush_failures: 0,
@@ -515,7 +619,7 @@ export function totals(days: DayStats[]) {
     addInto(error_codes, d.error_codes);
     addInto(tiers, d.tiers);
     addInto(buckets, d.latency_ms.buckets);
-    for (const c of d.clients) clients[c.client] = (clients[c.client] ?? 0) + c.sessions;
+    for (const c of d.clients) clients[c.client] = (clients[c.client] ?? 0) + c.principals;
   }
   return {
     calls,
@@ -530,7 +634,7 @@ export function totals(days: DayStats[]) {
     clients: Object.entries(clients)
       .sort((a, b) => b[1] - a[1])
       .slice(0, STATS_TOP_CLIENTS)
-      .map(([client, n]) => ({ client, sessions: n })),
+      .map(([client, n]) => ({ client, principal_days: n })),
     degraded_activations: degraded,
     latency_ms: { buckets, p50: bucketPercentile(buckets, 0.5), p95: bucketPercentile(buckets, 0.95) },
   };
