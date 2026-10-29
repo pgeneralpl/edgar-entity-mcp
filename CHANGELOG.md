@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- **Guide page:** `public/guides/sec-edgar-mcp.html`, served at `/guides/sec-edgar-mcp` (`cleanUrls`): the approved tutorial "How to research a US company with SEC EDGAR in Claude or Cursor using MCP" as static HTML with canonical URL and JSON-LD (TechArticle, HowTo, SoftwareApplication, FAQPage). Inline `<style>` only, no scripts besides inert JSON-LD and no external resources; `vercel.json` applies the strict HTML CSP to the new path. Test: `tests/guide.test.ts`.
+
 - **Aggregate usage statistics (hosted server):** daily counters in Redis (`eem:v1:stats:YYYY-MM-DD:{c,u,cl}`, `EXPIREAT` end of the UTC day + 30 days): calls / ok / errors per tool, error codes, tier, latency histogram (approximate p50/p95), MCP sessions (`initialize`), client-software labels from a fixed allowlist of well-known MCP clients (major version only; anything else `other`; counted once per principal per day after its first successful tool call), degraded-mode activations, and approximate unique clients per day (HyperLogLog over `HMAC(random daily salt, principal id)`; the salt's TTL ends at 01:00 UTC the next day, after which no member is written for that day). Recorded only by Vercel production (`VERCEL_ENV=production`) or self-hosted servers (no `VERCEL`), never by previews. Aggregated per instance and written with one fire-and-forget `EVALSHA` per ≤ 1 flush/min/instance (1.5 s timeout, never fails or slows a request, 0 commands while degraded); ≈ 95 keys, ≤ ~1 MB. `STATS_ENABLED=false` turns it off. New `GET /stats?days=N` (1–30, default 7) gated by `STATS_SECRET` (`x-stats-secret`, constant-time; unset / wrong / missing → 404). Privacy policy and README updated.
 
 - **Post-launch hardening (MCP SEC Security audit, issue #5):**
