@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- **Aggregate usage statistics (hosted server):** daily counters in Redis (`eem:v1:stats:YYYY-MM-DD:{c,u,cl}`, 90-day TTL): calls / ok / errors per tool, error codes, tier, latency histogram (approximate p50/p95), MCP sessions (`initialize`), client software `name/version` (normalized, ≤ 64 chars, top 50), degraded-mode activations, and approximate unique clients per day (HyperLogLog over `HMAC(random daily salt, principal id)`; the salt expires ~1 h after its day). Aggregated per instance and written with one fire-and-forget `EVALSHA` per ≤ 1 flush/min/instance (1.5 s timeout, never fails or slows a request, 0 commands while degraded); ≤ 272 keys, ≤ ~2 MB. `STATS_ENABLED=0` turns it off. New `GET /stats?days=N` (1–30, default 7) gated by `STATS_SECRET` (`x-stats-secret`, constant-time; 401 / 404 while unset). Privacy policy and README updated.
+
 - **Post-launch hardening (MCP SEC Security audit, issue #5):**
   - `/health?deep=1` without a valid `x-health-secret` (or with `HEALTH_SECRET` unset) now returns **401** and no health data (was 200 with `deep: "skipped …"`). The authorised deep output adds `node_version` (`process.version`) and `node_runtime_patched`; `node_runtime_patched` is removed from the public `/health`.
   - Security headers in `vercel.json`: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer` on every path (including `/mcp` and `/health`), and on the HTML pages (`/`, `/privacy`, `/terms`, `/abuse`) `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'` (the pages use inline `style` attributes and nothing else). No CSP on `/mcp` or `/health`.

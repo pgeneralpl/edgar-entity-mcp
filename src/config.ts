@@ -53,6 +53,10 @@ export interface Config {
   keyRequestUrl: string;
   /** Shared secret for /health?deep=1 (header x-health-secret). Unset = deep checks disabled. */
   healthSecret?: string;
+  /** Aggregate daily usage counters in Redis (STATS_ENABLED, default on; needs Upstash). */
+  statsEnabled: boolean;
+  /** Shared secret for GET /stats (header x-stats-secret). Unset or shorter than 32 chars = /stats disabled. */
+  statsSecret?: string;
   maxBodyBytes: number;
   maxDocumentBytes: number;
   suppressionFile?: string;
@@ -123,6 +127,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxConcurrentUpstreamPerClient: num(env.MAX_CONCURRENT_UPSTREAM_PER_CLIENT, 4),
     keyRequestUrl: env.KEY_REQUEST_URL?.trim() || "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request",
     healthSecret: env.HEALTH_SECRET?.trim() || undefined,
+    statsEnabled: !/^(0|false|off|no)$/i.test(env.STATS_ENABLED?.trim() ?? ""),
+    statsSecret: (env.STATS_SECRET?.trim().length ?? 0) >= 32 ? env.STATS_SECRET!.trim() : undefined,
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
     maxDocumentBytes: num(env.MAX_DOCUMENT_BYTES, 15 * 1024 * 1024),
     suppressionFile: env.SUPPRESSION_FILE?.trim() || undefined,

@@ -9,6 +9,9 @@
     },
     "api/health.ts": {
       "maxDuration": 10
+    },
+    "api/stats.ts": {
+      "maxDuration": 10
     }
   },
   "rewrites": [
@@ -19,6 +22,10 @@
     {
       "source": "/health",
       "destination": "/api/health"
+    },
+    {
+      "source": "/stats",
+      "destination": "/api/stats"
     }
   ],
   "headers": [

@@ -176,6 +176,8 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `API_KEY_SECRET` | – (**required with Redis**) | Secret (≥32 random chars, different from `IP_HASH_SALT`) used to sign API keys (`eem_<id>_<HMAC>`). Rotating it invalidates every minted key at once. Without Redis, minted keys are disabled. |
 | `REVOKED_KEY_IDS` | – | Comma-separated key ids (or full keys) refused immediately on every instance, without Redis — use for urgent revocation, including during degraded mode |
 | `HEALTH_SECRET` | – | Enables `/health?deep=1` (Node.js version and patch state, Redis ping, write-budget state) for requests sending `x-health-secret: <value>`; any other `?deep=1` request (or every one while unset) gets HTTP 401 |
+| `STATS_ENABLED` | on | Aggregate daily usage counters in Redis (see [Usage statistics](#usage-statistics)); `0` / `false` turns them off (0 commands) |
+| `STATS_SECRET` | – | Enables `GET /stats?days=N` for requests sending `x-stats-secret: <value>` (≥ 32 chars, e.g. `openssl rand -hex 32`); wrong/missing header → 401, unset or shorter → 404 |
 | `SUPPRESSION_FILE` | – | JSON array of suppression entries (see [Privacy](#privacy-and-personal-data)) |
 | `MAX_BODY_BYTES` / `MAX_DOCUMENT_BYTES` | 65536 / 15 MB | HTTP request body cap / max filing document size |
 | `USAGE_LOG` | – | `1` logs per-call usage JSON (tool, latency, ok, response size, hashed principal) to stderr |
@@ -286,6 +288,28 @@ So with the defaults: the anonymous tier uses at most ~38 % of the 50 GB/month, 
 
 `/health` reports `status: "degraded"` with the reason (`redis unavailable`, `redis plan limit reached` (e.g. the monthly bandwidth), or `redis full` when the quota script itself hits the data-size limit).
 
+### Usage statistics
+
+With Redis configured and `STATS_ENABLED` not `0`, the HTTP server keeps **aggregate, non-identifying** counters per UTC day (`src/core/stats.ts`), each key with a 90-day TTL (relative `EXPIRE`, refreshed on write):
+
+| Key | Type | Content |
+|---|---|---|
+| `eem:v1:stats:YYYY-MM-DD:c` | hash | `calls:<tool>`, `ok:<tool>`, `err:<tool>`; `ec:<ERROR_CODE>` (known codes, else `OTHER`); `tier:anon` / `tier:key`; `init` (MCP `initialize` = sessions); `degraded` (degraded-mode activations); `lat:<ms>` latency histogram (≤ 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000 ms, `inf`); `flush_fail` |
+| `eem:v1:stats:YYYY-MM-DD:u` | HyperLogLog | approximate unique clients: `HMAC-SHA256(random daily salt, principal id)`, 64 bits. The principal id is already the daily-salted IP hash or the key id; the raw IP and the key id never reach this key |
+| `eem:v1:stats:YYYY-MM-DD:cl` | sorted set | `clientInfo` `name/version` from `initialize`, safe charset (`A-Z a-z 0-9 . _ + - space`), ≤ 64 chars, top 50 kept |
+| `eem:v1:stats:salt:YYYY-MM-DD` | string | the random daily salt for the HLL; expires 1 h after its UTC day ends, so afterwards nobody (not even with `IP_HASH_SALT`) can test whether a given client is in that day's HLL |
+
+Bounded: ≤ 3 keys per day + 1 salt (≤ 272 keys in total), ≤ ~70 hash fields per day (tool names are the registered tools, other strings map to `other` / `OTHER`), ≤ ~20 KB per day (HLL ≤ 12 KB dense), **≤ ~2 MB for 90 days**.
+
+**Cost.** Events are aggregated in each instance's memory and written with **one** `EVALSHA` per flush (`HINCRBY` per field + `EXPIRE`, `PFADD` + `EXPIRE`, `ZINCRBY` per client + `ZCARD` (+ `ZREMRANGEBYRANK`) + `EXPIRE`), plus one salt lookup (`EVALSHA` with `GET`, + `SET` once per day fleet-wide) per instance per UTC day. An instance flushes at most once per 60 s: the first event after a quiet minute is written immediately, later ones are coalesced into one trailing flush. Writes are fire-and-forget (registered with Vercel's `waitUntil`), time out after 1.5 s, never fail or delay a request, never trip degraded mode (a failed batch is dropped, counted in `flush_fail`, and stats back off 60 s, 10 min on "redis full"), and are skipped (0 commands) while Redis is degraded. Per flush the request carries ≤ 100 HLL members (16 hex chars), ≤ 20 client labels and ≤ ~70 fields: **≤ ~6 KB including HTTP overhead, typically ~1–2 KB**.
+
+| Scenario | Flushes / day | Billed commands / day | Bandwidth / day |
+|---|---|---|---|
+| Typical: one sporadic call or session per flush (≈ 8–12 commands per flush, ~1.5 KB) | ≈ requests, ≤ 1/min/instance | e.g. 300 calls → ≈ 3K | < 1 MB |
+| Worst case (assumption above: ≤ 20 instances warm all day, each busy every minute; ≤ 500 cold starts each + salt lookup) | ≤ 20 × 1,440 + 500 ≈ 29.3K | ≤ ~1.2M (≈ 40 per busy flush; not billed on the Fixed plan, ≈ 14 commands/s) | ≤ ~180 MB (≈ 5.5 GB / month, ~11 % of 50 GB) |
+
+`GET /stats?days=N` (1–30, default 7) with `x-stats-secret: <STATS_SECRET>` returns `days[]` (today first) and `totals`: calls / ok / errors per tool, error codes, tiers, sessions, `unique_clients_approx` (HLL `PFCOUNT`, per day; `totals.unique_client_days_approx` sums them, so a client seen on 3 days counts 3), top clients, degraded activations and the latency histogram with approximate `p50` / `p95` (upper edge of the bucket, e.g. `"<=250"`). One `EVALSHA` per request (3 inner reads per day). Only counts are returned; HLL members are never read. Constant-time secret comparison; 401 on a wrong/missing secret, 404 while `STATS_SECRET` is unset.
+
 ### Redis memory budget
 
 The Upstash database runs with **eviction off**. Upstash has a single eviction policy ("optimistic-volatile": random keys, TTL keys first, then any key), so with eviction on, a full database would silently drop quota counters (resetting them, i.e. failing open), API key records and the suppression set. With eviction off, a full database rejects writes (`ERR DB capacity quota exceeded`) instead, so the cache has to stay well below the plan's data size (250 MB on the Fixed 250 MB plan, taken as 250 × 10^6 bytes ≈ 238 MiB) by itself. With the defaults, worst-case stored data is ≈ 2 × 64 MiB + < 1 MB ≈ **135 MB, ~54 % of 250 MB**:
@@ -323,7 +347,8 @@ Rate limiting keeps **only integer counters** in Redis, under hashed identifiers
 
 - `<hash>` for IPs is `HMAC-SHA256(daily salt, IP or prefix)` truncated to 80 bits, where the daily salt is `HMAC-SHA256(IP_HASH_SALT, YYYYMMDD)`. Hashes from different days can't be linked, and once a day's counters expire nothing derived from that day's IPs is left. A request is hashed and counted against the same UTC day, so requests that straddle midnight are counted consistently. The per-minute counter for an IP restarts at midnight because its hash changes, so a client can get at most one extra minute's worth of quota at that moment.
 - For keys, `<id>` is the key's public id (the secret part never reaches Redis). API key records (`eem:v1:apikey:<id>`) hold only the creation date and optional per-key limits, until deleted with `scripts/delete-key.ts` (which also deletes the key's counters). The suppression set (`eem:v1:suppress`) holds erasure-request entries.
-- Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries for public SEC and state data are stored under `eem:v1:c:<sha256 of the upstream request>`, so key names don't reveal what was searched; they expire after at most 24 h. The upstream fan-out budget (`eem:rl:*`) is a global token bucket with no per-client data.
+- Aggregate usage statistics (`eem:v1:stats:*`, 90 days, see [Usage statistics](#usage-statistics)): per-day counts per tool / outcome / error code / tier / latency bucket, session count, client software name/version (top 50), and an approximate unique-client count (HyperLogLog over a hash keyed with a random daily salt that is deleted ~1 h after the day). No per-client records.
+- Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-client usage history. Shared cache entries for public SEC and state data are stored under `eem:v1:c:<sha256 of the upstream request>`, so key names don't reveal what was searched; they expire after at most 24 h. The upstream fan-out budget (`eem:rl:*`) is a global token bucket with no per-client data.
 - **Logs**: errors (and, with `USAGE_LOG=1`, one line per call with tool name, latency, outcome, response size and the daily-rotating principal hash) go to stderr, then to Vercel runtime logs, which expire under Vercel's plan retention ([limits](https://vercel.com/docs/logs/runtime#limits)). Error text has URL query strings, IP addresses, email addresses and credential-like values masked. Tool arguments, API keys and raw IPs are never logged by this server. Vercel's own platform request logs (outside this code) record request metadata such as path and client IP under Vercel's retention.
 - Per-minute limits are kept in process memory only (70 s) and never written to Redis.
 - `/health` reports this configuration under `quotas.state`.
@@ -339,6 +364,7 @@ Set these in the Vercel project (Production and Preview) before taking the deplo
 | `IP_HASH_SALT` | ≥ 32 random chars (`openssl rand -hex 32`) |
 | `API_KEY_SECRET` | ≥ 32 random chars, different from `IP_HASH_SALT` |
 | `HEALTH_SECRET` | random; enables `/health?deep=1` (401 without it) |
+| `STATS_SECRET` | optional, ≥ 32 random chars; enables `GET /stats` (404 while unset) |
 | `SOCRATA_APP_TOKEN` | free app token from the state portals (higher throttling limits) |
 | `KEY_REQUEST_URL` | where users request a free key (default: GitHub issue link) |
 | `DEGRADED_SEC_RPS` | `0.2` (or `0` to stop SEC calls entirely while Redis is out) |
