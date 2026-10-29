@@ -128,7 +128,7 @@ try {
   const rawIps = [ipA["x-real-ip"], "198.51.100.", "100.64.", "192.0.2.1"];
   check(!rawIps.some((ip) => dump.includes(ip)), "no raw IP anywhere in keys or values");
   const other = all.filter((k) => !k.includes(":q:") && !k.includes(":apikey:"));
-  check(other.every((k) => /:c:[0-9a-f]{40}$/.test(k)), `${other.length} cache keys, all hashed (no URLs or tool arguments in key names)`);
+  check(other.every((k) => /:(c:[0-9a-f]{40}|cw:\d{8})$/.test(k)), `${other.length} cache keys, all hashed (no URLs or tool arguments in key names) or the daily write-budget counter`);
   const { ipPrincipal } = await import("../src/core/apiKeys.js");
   check(ipPrincipal("198.51.100.7", "20261020").id !== ipPrincipal("198.51.100.7", "20261021").id, "IP hash salt rotates daily");
   before = redisRequests;
@@ -150,6 +150,44 @@ try {
   for (let i = 0; i < 6; i++) await lim.acquire();
   const el = Date.now() - t0;
   check(el >= 1500, `6 acquisitions at 2 rps (burst 2) took ${el} ms`);
+
+  console.log("Cache guard (write budget, compression, 24 h TTL)");
+  {
+    const { UpstashCache, cacheBudgetKey, redisCacheKey, cacheWriteStatus, resetCacheWriteState, TTL } = await import("../src/core/cache.js");
+    resetCacheWriteState();
+    const tr = await realFetch("https://www.sec.gov/files/company_tickers_exchange.json", { headers: { "user-agent": c.secUserAgent, accept: "application/json" } });
+    const raw = await tr.text();
+    check(tr.ok && raw.length > 256 * 1024, `SEC ticker file fetched (${raw.length} bytes raw)`);
+    const uc = new UpstashCache(redis, c.redisMaxValueBytes, c.cacheWriteBudgetBytes);
+    let b0 = redisRequests;
+    await uc.set("livetest:tickers", raw, TTL.tickers);
+    check(redisRequests - b0 === 3, `first cache write of the day: ${redisRequests - b0} commands (INCRBY + EXPIREAT + SET)`);
+    const rk = redisCacheKey("livetest:tickers");
+    const stored = await redis.get<string>(rk);
+    check(!!stored && stored.startsWith("\u0001gz1:") && stored.length <= c.redisMaxValueBytes, `ticker file stored gzip+base64: ${stored?.length} bytes (cap ${c.redisMaxValueBytes})`);
+    const usage = await realFetch(c.upstashUrl!, { method: "POST", headers: { authorization: `Bearer ${c.upstashToken}` }, body: JSON.stringify(["MEMORY", "USAGE", rk]) }).then((r) => r.json() as Promise<{ result?: number }>);
+    console.log(`  MEMORY USAGE of the compressed ticker entry: ${usage.result ?? "n/a"} bytes`);
+    const ttl = await redis.ttl(rk);
+    check(ttl > 0 && ttl <= 24 * 3600, `ticker entry TTL ${ttl} s (<= 24 h)`);
+    b0 = redisRequests;
+    check((await uc.get("livetest:tickers")) === raw && redisRequests - b0 === 1, `round trip decompresses to the original (${redisRequests - b0} command)`);
+    b0 = redisRequests;
+    await uc.set("livetest:small", JSON.stringify({ ok: 1 }), 7 * 24 * 3600);
+    check(redisRequests - b0 === 2, `further cache write: ${redisRequests - b0} commands (INCRBY + SET)`);
+    check((await redis.ttl(redisCacheKey("livetest:small"))) <= 24 * 3600, "a 7-day TTL request is capped at 24 h in Redis");
+    const bk = cacheBudgetKey();
+    const used = Number(await redis.get<string>(bk));
+    const bttl = await redis.ttl(bk);
+    check(used >= stored!.length && bttl > 0 && bttl <= 25 * 3600, `budget counter ${bk.replace(c.cachePrefix, "<prefix>")} = ${used} bytes, TTL ${bttl} s (<= 25 h)`);
+    const tight = new UpstashCache(redis, c.redisMaxValueBytes, used + 100);
+    await tight.set("livetest:x1", "y".repeat(200), 60); // would exceed: refused locally
+    b0 = redisRequests;
+    for (let i = 0; i < 20; i++) await tight.set(`livetest:x${i + 2}`, "z", 60);
+    check(redisRequests === b0 && cacheWriteStatus().writes === "budget exhausted", `budget exhausted: 20 writes cost ${redisRequests - b0} commands`);
+    b0 = redisRequests;
+    check((await tight.get("livetest:small")) !== undefined && redisRequests - b0 === 1, "reads continue while the write budget is exhausted");
+    resetCacheWriteState();
+  }
 
   console.log("Degraded mode (Redis rejects requests)");
   const broken = new Redis({ url: c.upstashUrl, token: "invalid-token", automaticDeserialization: false });

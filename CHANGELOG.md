@@ -2,6 +2,8 @@
 
 ## 0.2.0 (unreleased)
 
+- **Redis cache limits (eviction off):** the Upstash database runs with eviction off (Upstash's only eviction policy evicts random keys and would reset quota counters), so the cache bounds itself: fleet-wide daily cache-write budget `CACHE_WRITE_BUDGET_BYTES` (default 150 MiB; one `INCRBY` on a ≤ 25 h `eem:v1:cw:<day>` key pipelined with each `SET`, 0 commands once exhausted until UTC midnight; reads continue); document and Form 4 cache TTL 7 days → 24 h (raw documents in memory 30 days → 24 h; Redis TTL capped at 24 h); `REDIS_MAX_VALUE_BYTES` 900 KB → 256 KiB, measured after gzip (values ≥ 8 KB stored compressed; the SEC ticker file ~520 KB → ~240 KB, still shared); a capacity error (`ERR DB capacity quota exceeded` / OOM) on a cache write stops only cache writes on that instance for 10 min ("redis full" in `/health`), while counters, the quota script, API keys and suppression keep their fail-closed handling (a capacity error there enters degraded mode with reason "redis full"). Cache write cost 1 → 2 commands (3 for an instance's first write of the day); refusals still 0.
+
 - **Node.js runtime (security release 2026-10-21, CVE-2026-111497 Brotli decoder OOB write, TLS hostname bypasses, undici):** `engines.node` `>=20` → `24.x` (Vercel runtime pin); `.nvmrc` / `.node-version` 24.22.1; CI matrix 22.x + 24.x with `check-latest` and a patched-version assertion (`scripts/check-node-version.mjs`); release workflow on `.nvmrc`. Stdio users need Node.js ≥ 22.23.4 or ≥ 24.22.1; the CLI warns on stderr otherwise. Node.js 20 (EOL) is no longer supported.
 
 Security hardening (audit 2026-10-20).

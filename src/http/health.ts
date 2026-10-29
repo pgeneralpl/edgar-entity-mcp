@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "../config.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
 import { SUPPORTED_STATES } from "../states/registry.js";
-import { getRedis } from "../core/cache.js";
+import { REDIS_COMPRESS_MIN_BYTES, cacheWriteStatus, getRedis } from "../core/cache.js";
 import { logError } from "../core/errors.js";
 import { degradedStatus } from "../core/degraded.js";
 import { isPatchedNode } from "../core/nodeVersion.js";
@@ -20,6 +20,7 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
     version: VERSION,
     mcp_endpoint: "/mcp",
     cache: redis ? "upstash+memory" : "memory",
+    ...(redis ? { redis_cache: redisCacheHealth(c.cacheWriteBudgetBytes, c.redisMaxValueBytes) } : {}),
     sec_rate_limit: {
       rps: c.secMaxRps,
       reserved_for_api_keys_rps: redis ? Math.min(c.secKeyedReservedRps, Math.max(0, c.secMaxRps - 1)) : 0,
@@ -40,6 +41,19 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
     node_runtime_patched: isPatchedNode(),
     auth_required: c.requireApiKey,
     states: SUPPORTED_STATES,
+  };
+}
+
+/** Cache-write guard state (eviction is off, so the cache bounds itself). No traffic volumes exposed. */
+function redisCacheHealth(budgetBytes: number, maxValueBytes: number) {
+  const w = cacheWriteStatus();
+  return {
+    writes: budgetBytes <= 0 ? "disabled" : w.writes, // "ok" | "redis full" | "budget exhausted" | "disabled"
+    ...(w.until && w.writes !== "ok" ? { until: w.until } : {}),
+    write_budget_bytes_per_utc_day: budgetBytes,
+    max_value_bytes: maxValueBytes,
+    compressed_from_bytes: REDIS_COMPRESS_MIN_BYTES,
+    max_ttl_hours: 24,
   };
 }
 

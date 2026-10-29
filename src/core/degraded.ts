@@ -11,11 +11,25 @@ let until = 0;
 let since = 0;
 let lastReason = "";
 
+/**
+ * Upstash with eviction off rejects writes once the database is at its data-size limit
+ * ("ERR DB capacity quota exceeded"); self-hosted Redis says "OOM command not allowed when used
+ * memory > 'maxmemory'". Deliberately narrow: request/bandwidth plan limits are a different error.
+ */
+const CAPACITY_RE = /DB capacity quota exceeded|OOM command not allowed|used memory > 'maxmemory'|max(?:imum)? data size (?:limit )?(?:exceeded|reached)/i;
+export function isRedisCapacityError(why: unknown): boolean {
+  return CAPACITY_RE.test(why instanceof Error ? why.message : String(why));
+}
+export function redisErrorReason(why: unknown): string {
+  if (isRedisCapacityError(why)) return "redis full";
+  return /max requests limit/i.test(String(why)) ? "redis plan limit reached" : "redis unavailable";
+}
+
 export function markRedisDegraded(why: unknown): void {
   const now = Date.now();
   if (now >= until) {
     since = now;
-    lastReason = /max requests limit/i.test(String(why)) ? "redis plan limit reached" : "redis unavailable";
+    lastReason = redisErrorReason(why);
     logError("redis-degraded", why);
   }
   until = now + DEGRADED_COOLDOWN_MS;
