@@ -109,7 +109,7 @@ describe("name variants, ordering and pagination URLs", () => {
     expect(buildWhere(src("NY"), { name: "Tiffany and Company", mode: "contains" })).toBe("upper(current_entity_name) like '%TIFFANY%'");
     expect(buildWhere(src("NY"), { name: "J.P. Morgan Securities", mode: "starts_with" })).toBe("upper(current_entity_name) like 'J%P%MORGAN%SECURITIES%'");
     // Only A-Z/0-9 reach LIKE patterns: no quotes, wildcards or SoQL syntax.
-    expect(buildWhere(src("CO"), { name: "x' OR 1=1 --%_", mode: "contains" })).toBe("upper(entityname) like '%X%OR%1%1%'");
+    expect(buildWhere(src("CO"), { name: "xyz' OR 1=1 --%_", mode: "contains" })).toBe("upper(entityname) like '%XYZ%OR%1%1%'");
     expect(buildWhere(src("CO"), { name: "O'Brien", mode: "exact" })).toContain("'O''BRIEN'");
     expect(() => buildWhere(src("CO"), { name: "!!", mode: "contains" })).toThrow(/letters or digits/);
   });

@@ -16,11 +16,39 @@ export const MULTIROW_WINDOW = 300;
 export const MAX_VARIANTS = 32;
 /** Max tokens used in a LIKE pattern. */
 const MAX_PATTERN_TOKENS = 8;
+/** Largest offset anonymous (keyless) HTTP callers may request: limits bulk enumeration of registries. */
+export const ANON_MAX_OFFSET = 100;
+/** In contains mode at least one pattern token must be this long ("%A%B%" would match almost everything). */
+export const MIN_CONTAINS_TOKEN = 3;
+/** State entity ids: letters, digits and dashes only. */
+export const ENTITY_ID_RE = /^[A-Za-z0-9-]{1,40}$/;
 
-/** Escape a value for a SoQL string literal. */
-export function soqlString(v: string): string {
-  return `'${v.replace(/'/g, "''")}'`;
+/**
+ * Largest useful offset for a row-per-name dataset (OR): its pagination covers a MULTIROW_WINDOW-row
+ * window grouped into entities (~rowsPerEntity rows each), so pages past this offset are empty.
+ */
+export function multiRowMaxOffset(src: Pick<StateSource, "rowsPerEntity">): number {
+  return Math.floor(MULTIROW_WINDOW / (src.rowsPerEntity ?? 4)) - 1;
 }
+
+/** States whose page at `offset` would certainly be empty (no request is made, nothing is charged). */
+export function statesBeyondWindow(states: string[], offset: number): string[] {
+  return states.filter((st) => {
+    const src = STATE_SOURCES[st];
+    return !!src?.multiRow && offset > multiRowMaxOffset(src);
+  });
+}
+
+/**
+ * Escape a value for a SoQL string literal: quotes are doubled and backslashes removed (an escape
+ * character must never reach the query; names and ids never need one).
+ */
+export function soqlString(v: string): string {
+  return `'${v.replace(/\\/g, "").replace(/'/g, "''")}'`;
+}
+
+/** Characters kept in the as-typed exact-match variant (everything else becomes a space). */
+const TYPED_UNSAFE = /[^A-Z0-9 &.,'-]+/g;
 
 /** Upper-case, collapse whitespace and drop LIKE wildcards. */
 export function cleanNameQuery(q: string): string {
@@ -75,7 +103,8 @@ export function nameVariants(name: string, opts: { addSuffixes?: boolean } = {})
   const add = (v: string) => {
     if (out.size < MAX_VARIANTS) out.add(v);
   };
-  const typed = cleanNameQuery(name);
+  // The as-typed spelling ("AT&T INC.") reduced to an allowlisted charset: the raw input never reaches $where/$order.
+  const typed = cleanNameQuery(name).replace(TYPED_UNSAFE, " ").replace(/\s+/g, " ").trim();
   if (typed) add(typed);
   // Collapsed tokens so "L.L.C." becomes the LLC key.
   const t0 = normalizeName(name).split(" ").filter(Boolean);
@@ -111,15 +140,34 @@ function nameClause(src: StateSource, name: string, mode: MatchMode): string {
   if (mode === "exact") return `${f} in (${nameVariants(name).map(soqlString).join(", ")})`;
   const tokens = patternTokens(name);
   if (!tokens.length) throw new ToolError("INVALID_INPUT", "name must contain letters or digits.");
+  if (mode === "contains") assertContainsName(name);
   // Tokens in order with anything between them: "Tiffany and Company" -> TIFFANY% (matches "TIFFANY & CO.").
   const body = tokens.join("%");
   return `${f} like ${soqlString(mode === "starts_with" ? `${body}%` : `%${body}%`)}`;
 }
 
+/** Throws INVALID_INPUT unless a contains-mode name has at least one token of MIN_CONTAINS_TOKEN+ chars. */
+export function assertContainsName(name: string): void {
+  const tokens = patternTokens(name);
+  if (!tokens.length) throw new ToolError("INVALID_INPUT", "name must contain letters or digits.");
+  if (!tokens.some((t) => t.length >= MIN_CONTAINS_TOKEN))
+    throw new ToolError(
+      "INVALID_INPUT",
+      `match='contains' needs at least one name word of ${MIN_CONTAINS_TOKEN}+ letters or digits (legal suffixes like Inc/LLC do not count).`,
+      "Use a longer name fragment, or match='starts_with' / 'exact' for very short names.",
+    );
+}
+
+export function assertEntityId(id: string): string {
+  const v = id.trim();
+  if (!ENTITY_ID_RE.test(v)) throw new ToolError("INVALID_INPUT", "entity_id may contain only letters, digits and '-' (max 40).");
+  return v;
+}
+
 export function buildWhere(src: StateSource, opts: { name?: string; entityId?: string; mode: MatchMode; activeOnly?: boolean }): string {
   const clauses: string[] = [];
   if (opts.activeOnly && src.activeWhere) clauses.push(src.activeWhere);
-  if (opts.entityId) clauses.push(`${src.idField} = ${soqlString(opts.entityId.trim())}`);
+  if (opts.entityId) clauses.push(`${src.idField} = ${soqlString(assertEntityId(opts.entityId))}`);
   if (opts.name) clauses.push(nameClause(src, opts.name, opts.mode));
   return clauses.join(" AND ");
 }
@@ -225,6 +273,17 @@ export async function searchState(
   if (!Number.isInteger(offset) || offset < 0 || offset > MAX_OFFSET) throw new ToolError("INVALID_INPUT", `offset must be 0..${MAX_OFFSET}.`);
   // Load the suppression list BEFORE any upstream request: refuse (cold start, Redis down) early.
   const suppression = opts.suppression ?? (await loadSuppression());
+  if (src.multiRow && offset > multiRowMaxOffset(src)) {
+    // Past the row window every page is empty: answer without an upstream request (and so without a charge).
+    return {
+      entities: [],
+      query_url: buildQueryUrl(src, buildWhere(src, opts), MULTIROW_WINDOW, { order: buildOrder(src, opts.name) }),
+      offset,
+      has_more: false,
+      active_only_dataset: src.activeWhere ? undefined : true,
+      note: `${src.code} pagination covers the first ${MULTIROW_WINDOW} rows (about ${multiRowMaxOffset(src) + 1} entities); offset ${offset} is past it. Refine the name (match='exact' or 'starts_with') to see more.`,
+    };
+  }
   const where = buildWhere(src, opts);
   if (!where) throw new ToolError("INVALID_INPUT", "Provide name or entity_id.");
   const order = buildOrder(src, opts.name);
@@ -237,7 +296,9 @@ export async function searchState(
     if (!Array.isArray(rows)) throw new ToolError("UPSTREAM_ERROR", `Unexpected response from ${src.domain}`);
     return rows;
   };
-  const totalP = opts.includeTotal ? countState(src, where) : undefined;
+  // The count runs in parallel with the page fetch. Its rejection is handled at creation: if the page
+  // fetch throws first, nobody awaits totalP, and an unhandled rejection would crash the process.
+  const totalP = opts.includeTotal ? countState(src, where).catch(() => undefined) : undefined;
   if (src.multiRow) {
     // Row-per-associated-name dataset: fetch a window from the start, group by id, then slice.
     const want = Math.min(MULTIROW_WINDOW, (offset + opts.limit + 1) * (src.rowsPerEntity ?? 4));
@@ -248,7 +309,11 @@ export async function searchState(
     if (truncated && all.length > 1) all = all.slice(0, -1); // last entity may be missing rows
     page = all.slice(offset, offset + opts.limit);
     hasMore = all.length > offset + opts.limit || truncated;
-    if (truncated && want >= MULTIROW_WINDOW && all.length <= offset + opts.limit)
+    // Never point next_offset past the window (those pages are always empty; see multiRowMaxOffset).
+    const atWindowEnd = offset + opts.limit > multiRowMaxOffset(src);
+    const beyond = truncated || all.length > offset + opts.limit;
+    if (atWindowEnd) hasMore = false;
+    if ((atWindowEnd && beyond) || (truncated && want >= MULTIROW_WINDOW && all.length <= offset + opts.limit))
       note = `${src.code} lists one row per associated name; pagination covers the first ${MULTIROW_WINDOW} rows only. Refine the name (match='exact' or 'starts_with') to see more.`;
   } else {
     // One row (or one group) per entity: precise server-side pagination, one extra row for has_more.

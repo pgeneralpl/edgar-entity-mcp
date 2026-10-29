@@ -55,7 +55,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | `compare_companies` | 3 |
 | `get_filing_document` | 4 by `url`, 10 by `company` + `accession` |
 | `get_insider_trades` | 6 + `limit` (max 20 filings → 26) |
-| `lookup_business_entity` | number of states (max 5); × 2 with `include_total` (max 10) |
+| `lookup_business_entity` | number of states (max 5); × 2 with `include_total`; + 1 when `offset` > 0 (max 11). OR is not counted (0 if it is the only state) once `offset` is past its 300-row window (59), where the call returns an empty page without querying. Anonymous HTTP callers cannot use `offset` > 100; rejected calls are refunded |
 
 | Client | Per minute | Per day (UTC) |
 |---|---|---|

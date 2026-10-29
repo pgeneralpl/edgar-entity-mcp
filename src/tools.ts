@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { ToolError, toToolError } from "./core/errors.js";
 import { UNTRUSTED_NOTICE, cleanDeep, wrapUntrusted } from "./core/untrusted.js";
-import { callerIsTrusted } from "./core/context.js";
+import { callerIsAnonymous, callerIsTrusted, currentContext } from "./core/context.js";
 import { loadSuppression } from "./states/suppression.js";
 import { compact } from "./core/util.js";
 import { NOT_LISTED_HINT, TICKERS_EXCHANGE_URL, edgarCompanySearchUrl, resolveCompany, searchCompanies, suggestCompaniesFor } from "./sec/tickers.js";
@@ -10,7 +10,7 @@ import { extractSection, fetchDocumentText, listSections, normalizeSectionId, SE
 import { getFinancials, METRIC_KEYS } from "./sec/financials.js";
 import { getConcept, getFrame } from "./sec/xbrl.js";
 import { getInsiderTrades } from "./sec/insider.js";
-import { MAX_OFFSET, searchState, type MatchMode } from "./states/socrata.js";
+import { ANON_MAX_OFFSET, ENTITY_ID_RE, MAX_OFFSET, assertContainsName, searchState, statesBeyondWindow, type MatchMode } from "./states/socrata.js";
 import { COLORADO_DISCLAIMER, STATE_SOURCES, SUPPORTED_STATES, UNSUPPORTED_NOTES } from "./states/registry.js";
 import { normalizeAccession } from "./core/util.js";
 
@@ -215,13 +215,14 @@ export const compareCompanies = def({
     period: z.string().min(4).max(12).describe("CY2024, CY2024Q3, or CY2024Q4I"),
     taxonomy: z.enum(["us-gaap", "ifrs-full", "dei", "srt"]).default("us-gaap"),
     unit: z.string().max(40).default("USD").describe("USD, USD-per-shares, shares, pure"),
-    companies: z.array(z.string()).max(25).optional().describe("Tickers or CIKs to include (default: all)"),
+    companies: z.array(z.string().min(1).max(40)).max(25).optional().describe("Tickers or CIKs to include (default: all)"),
     order: z.enum(["desc", "asc"]).default("desc"),
     limit: z.number().int().min(1).max(100).default(20),
   }),
   async run(a) {
     let ciks: string[] | undefined;
-    if (a.companies?.length) ciks = await Promise.all(a.companies.map(async (x) => (await resolveCompany(x)).cik));
+    // No did-you-mean scan here: up to 25 names per call would each run a fuzzy pass over the ticker list.
+    if (a.companies?.length) ciks = await Promise.all(a.companies.map(async (x) => (await resolveCompany(x, { suggest: false })).cik));
     let taxonomy: string = a.taxonomy;
     let tag = a.tag.trim();
     if (tag.includes(":")) [taxonomy, tag] = tag.split(":", 2) as [string, string];
@@ -270,7 +271,7 @@ export const lookupBusinessEntity = def({
   description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Name matching ignores case, punctuation, '&' vs 'and' and legal-suffix spelling (Inc/Inc./Incorporated, Co/Company, LLC/L.L.C.); results are ranked exact > prefix > other matches, active entities first within each tier. Paginate per state with limit/offset (has_more, next_offset; total when include_total=true or on the last page). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (individual agents withheld unless include_agent_details=true), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names; for SEC-listed companies use search_company. Call list_supported_states for coverage and licenses.`,
   inputSchema: z.object({
     name: z.string().min(2).max(200).optional().describe("Entity name or fragment, e.g. 'Tiffany & Co.' (also matches 'TIFFANY AND COMPANY')"),
-    entity_id: z.string().min(1).max(40).optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
+    entity_id: z.string().regex(ENTITY_ID_RE, "Letters, digits and '-' only (max 40)").optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
     states: z.array(z.enum(SUPPORTED_STATES as [string, ...string[]])).max(5).optional().describe("Default: all supported states"),
     match: z.enum(["contains", "starts_with", "exact"]).default("contains"),
     active_only: z.boolean().default(false).describe("Exclude dissolved/inactive entities (CO, CT)"),
@@ -281,7 +282,7 @@ export const lookupBusinessEntity = def({
       .min(0)
       .max(MAX_OFFSET)
       .default(0)
-      .describe(`Skip this many results per state (pagination; use next_offset from the previous page). Max ${MAX_OFFSET}.`),
+      .describe(`Skip this many results per state (pagination; use next_offset from the previous page). Max ${MAX_OFFSET} (${ANON_MAX_OFFSET} without an API key on the hosted server); pages after the first count one extra quota unit.`),
     include_total: z
       .boolean()
       .default(false)
@@ -292,8 +293,26 @@ export const lookupBusinessEntity = def({
       .describe("Include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Requires an API key on the hosted server. Default false: only organizational agents are shown."),
   }),
   async run(a) {
-    if (!a.name && !a.entity_id) throw new ToolError("INVALID_INPUT", "Provide name and/or entity_id.");
+    const ctx = currentContext();
+    // Input checks that reject the whole call run before any upstream request and charge nothing.
+    const reject = (msg: string, hint?: string): never => {
+      if (ctx) ctx.free = true;
+      throw new ToolError("INVALID_INPUT", msg, hint);
+    };
+    if (!a.name && !a.entity_id) reject("Provide name and/or entity_id.");
+    if (a.offset > ANON_MAX_OFFSET && callerIsAnonymous())
+      reject(`offset is limited to ${ANON_MAX_OFFSET} for anonymous use.`, "Refine the name (match='starts_with' or 'exact', a single state) or use an API key.");
+    if (a.name && a.match === "contains") {
+      try {
+        assertContainsName(a.name);
+      } catch (e) {
+        if (ctx) ctx.free = true;
+        throw e;
+      }
+    }
     const states = [...new Set(a.states?.length ? a.states : SUPPORTED_STATES)];
+    // Pages after the first cost one extra unit (kept at settlement), unless no state is queried at all.
+    if (ctx && a.offset > 0 && statesBeyondWindow(states, a.offset).length < states.length) ctx.surcharge = 1;
     // M-b: individual agent details only for API-key callers (and local stdio use).
     const detailsAllowed = callerIsTrusted();
     const includeAgentDetails = a.include_agent_details && detailsAllowed;

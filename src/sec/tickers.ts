@@ -76,15 +76,22 @@ function preparedRows(rows: TickerRow[]): Prepared[] {
   return p;
 }
 
+/** Typo tolerance and did-you-mean run only for queries up to this many characters ... */
+export const FUZZY_MAX_CHARS = 64;
+/** ... and this many name tokens (bounds the per-row edit-distance work over ~10k rows). */
+export const FUZZY_MAX_TOKENS = 8;
+
 interface PreparedQuery {
   qU: string;
   qT: string;
-  name: Pick<Prepared, "core" | "tokens" | "compact">;
+  name: Pick<Prepared, "core" | "tokens" | "compact"> & { fuzzy: boolean };
 }
 
 function prepareQuery(query: string): PreparedQuery {
   const qU = query.trim().toUpperCase();
-  return { qU, qT: qU.replace(/[-.\s]/g, ""), name: prepareName(query) };
+  const name = prepareName(query);
+  const fuzzy = qU.length <= FUZZY_MAX_CHARS && name.tokens.length <= FUZZY_MAX_TOKENS;
+  return { qU, qT: qU.replace(/[-.\s]/g, ""), name: { ...name, fuzzy } };
 }
 
 /** Name-only similarity of a prepared query and a prepared name, 0..97. */
@@ -100,6 +107,7 @@ function nameScore(q: PreparedQuery["name"], n: Pick<Prepared, "core" | "tokens"
   }
   if (q.compact.length >= 4 && n.compact.startsWith(q.compact)) return 80 - Math.min(10, n.compact.length - q.compact.length) / 2; // "JP Morgan" -> JPMORGAN CHASE
   if (n.core.includes(q.core)) return 55;
+  if (!q.fuzzy) return 0; // long query: exact/prefix matching only
   // Typo tolerance (edit distance per token): "Microsfot" -> MICROSOFT, "berkshre hathaway".
   const d = fuzzyTokenDistance(q.tokens, n.tokens);
   if (d !== undefined && d > 0) {
@@ -136,6 +144,7 @@ export interface CompanyMatch {
 }
 
 const preparedFormer = FORMER_NAMES.map((f) => ({ ...f, p: prepareName(f.name) }));
+
 
 /** Search the SEC ticker list. Rows sharing a CIK (multiple share classes) are merged. */
 export function rankCompanies(rows: TickerRow[], query: string, limit: number, threshold = MATCH_THRESHOLD): CompanyMatch[] {
@@ -181,6 +190,7 @@ export interface Suggestion {
  */
 export function suggestCompanies(rows: TickerRow[], query: string, limit = 5): Suggestion[] {
   const q = prepareQuery(query);
+  if (!q.name.fuzzy) return []; // long queries get no suggestions (CPU bound)
   const pr = preparedRows(rows);
   const scored = new Map<number, { s: number; m: Suggestion }>();
   for (let i = 0; i < rows.length; i++) {
@@ -229,17 +239,19 @@ export interface ResolvedCompany {
  * Resolve a user-supplied company reference (CIK, ticker, or name) to a CIK.
  * Digits are treated as CIK; otherwise exact ticker, then confident name match.
  */
-export async function resolveCompany(input: string): Promise<ResolvedCompany> {
+export async function resolveCompany(input: string, opts: { suggest?: boolean } = {}): Promise<ResolvedCompany> {
+  const suggest = opts.suggest ?? true;
   const q = input.trim();
   if (!q) throw new ToolError("INVALID_INPUT", "company is required (ticker, CIK, or company name)");
   if (/^(CIK)?\d{1,10}$/i.test(q)) return { cik: padCik(q) };
-  return derived(`resolve:${q.toUpperCase()}`, TTL.tickers, async () => {
+  // Separate key without suggestions so concurrent deduped calls never share the other variant's error.
+  return derived(`resolve:${suggest ? "" : "nosuggest:"}${q.toUpperCase()}`, TTL.tickers, async () => {
     const rows = await loadTickers();
     const matches = rankCompanies(rows, q, 5);
     const top = matches[0];
     if (!top)
       throw new ToolError("NOT_FOUND", `No SEC registrant matches "${q}".`, NOT_LISTED_HINT, {
-        did_you_mean: suggestCompanies(rows, q, 5),
+        did_you_mean: suggest ? suggestCompanies(rows, q, 5) : undefined,
         edgar_company_search_url: edgarCompanySearchUrl(q),
       });
     const second = matches[1];
