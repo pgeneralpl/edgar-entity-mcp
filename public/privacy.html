@@ -1,5 +1,4 @@
 <!doctype html>
-<!-- DRAFT: prepared without legal review on 2026-10-20. Must be reviewed by a qualified lawyer (Polish/EU law) before being relied on. -->
 <html lang="en"><head><meta charset="utf-8"><title>Privacy Policy - edgar-entity-mcp</title>
 <meta name="viewport" content="width=device-width,initial-scale=1"></head>
 <body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px">
@@ -36,7 +35,7 @@
 <li>Vercel platform and network data, including IP addresses: retained by Vercel as described in <a href="https://vercel.com/legal/privacy-policy">Vercel's privacy policy</a>.</li>
 <li>Rate-limit data: daily counters stored in Upstash under the hashed identifiers described above (hashed IP address, hashed network, or API key ID) expire automatically after 25 hours. Per-minute counters and counters of failed API-key attempts are held only in the memory of the serving instance and expire after about 70 seconds and 10 minutes respectively.</li>
 <li>API key records: until the key is deleted.</li>
-<li>Cache entries: between 10 minutes and 24 hours depending on data type. State registry searches are cached for 1 hour; SEC company data for 10 minutes to 24 hours (filing lists 10 minutes, older filing history and financial data 6 hours, cross-company comparisons 12 hours, ticker lists 24 hours); processed SEC filing text and parsed Form 4 reports for 24 hours in the shared cache; and raw SEC filing documents for up to 24 hours, in the memory of the serving instance only. No shared-cache entry is kept for more than 24 hours. The total amount written to the shared cache is also capped by a daily write budget (about 150 MB per UTC day); once it is used up, new responses are not stored in the shared cache until the next UTC day. Counters used to pace our requests to upstream sources, and the daily cache-write counter, are shared by all users and contain no personal data.</li>
+<li>Cache entries: between 10 minutes and 24 hours depending on data type. State registry searches are cached for 1 hour; SEC company data for 10 minutes to 24 hours (filing lists 10 minutes, older filing history and financial data 6 hours, cross-company comparisons 12 hours, ticker lists 24 hours); processed SEC filing text and parsed Form 4 reports for 24 hours in the shared cache; and raw SEC filing documents for up to 24 hours, in the memory of the serving instance only. No shared-cache entry is kept for more than 24 hours, or past 01:00 UTC of the day after it was written. The total amount written to the shared cache is also capped by a daily write budget (64 MiB, about 67 MB, per UTC day); once it is used up, new responses are not stored in the shared cache until the next UTC day. Counters used to pace our requests to upstream sources, and the daily cache-write counter, are shared by all users and contain no personal data.</li>
 </ul>
 
 <h3>Processors and recipients</h3>
@@ -48,7 +47,7 @@
 <p>We do not sell your personal data. We may disclose data where required by law or to protect the Service and others from abuse.</p>
 
 <h3>International transfers</h3>
-<p>Our processors are based in, or process data in, the United States. Vercel Inc. and Upstash, Inc. are both certified under the EU-U.S. Data Privacy Framework, and transfers to them rely on the European Commission's adequacy decision for that framework (Art. 45 GDPR). In addition, both processors' data processing agreements provide for the European Commission's Standard Contractual Clauses (Decision (EU) 2021/914) where those clauses are required. You can ask us for more information.</p>
+<p>Our processors are based in, or process data in, the United States. Transfers rely on both companies' EU-U.S. DPF certification (Art. 45 GDPR). Upstash's DPA also incorporates the 2021/914 SCCs. You can ask us for more information.</p>
 
 <h2>B. People named in public records</h2>
 <p>This section is also our information notice under Art. 14 GDPR for personal data that we did not collect from you directly.</p>
