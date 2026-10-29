@@ -8,6 +8,7 @@ import { createHttpHandler } from "./handler.js";
 import { config } from "../config.js";
 import { PACKAGE_NAME } from "../version.js";
 import { healthResponse } from "./health.js";
+import { statsResponse } from "./stats.js";
 import { logError } from "../core/errors.js";
 
 export function toWebRequest(req: IncomingMessage, origin: string): Request {
@@ -92,6 +93,9 @@ export function startHttpServer(port = Number(process.env.PORT ?? 3000), host = 
       const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
       if (url.pathname === "/" || url.pathname === "/health") {
         return void (await sendWebResponse(res, await healthResponse(toWebRequest(req, url.origin))));
+      }
+      if (url.pathname === "/stats") {
+        return void (await sendWebResponse(res, await statsResponse(toWebRequest(req, url.origin))));
       }
       if (url.pathname !== "/mcp" && url.pathname !== "/api/mcp") {
         res.statusCode = 404;

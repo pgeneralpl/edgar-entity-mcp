@@ -24,6 +24,28 @@ jobs:
         run: node scripts/check-node-version.mjs
       - run: npm ci
       - run: npm run check
+  stats-lua:
+    # Runs the real usage-stats Lua scripts against a real Redis (the unit tests use an emulator).
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+          check-latest: true
+          cache: npm
+      - name: Assert patched Node
+        run: node scripts/check-node-version.mjs
+      - run: npm ci
+      - run: npm run check:stats-redis
+        env:
+          REDIS_URL: redis://127.0.0.1:6379
   smoke:
     # Live calls to SEC + state portals; runs on main pushes only to stay polite.
     # Skips (green) when the SEC_USER_AGENT repo secret is not configured.

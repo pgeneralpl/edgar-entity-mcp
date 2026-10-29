@@ -25,12 +25,27 @@ export function redisErrorReason(why: unknown): string {
   return /max requests limit/i.test(String(why)) ? "redis plan limit reached" : "redis unavailable";
 }
 
+type DegradedListener = (reason: string) => void;
+const listeners = new Set<DegradedListener>();
+/** Called once per degraded-mode activation (not on every refresh of the cool-down). Must not throw. */
+export function onRedisDegraded(fn: DegradedListener): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
 export function markRedisDegraded(why: unknown): void {
   const now = Date.now();
   if (now >= until) {
     since = now;
     lastReason = redisErrorReason(why);
     logError("redis-degraded", why);
+    for (const fn of listeners) {
+      try {
+        fn(lastReason);
+      } catch {
+        /* listeners are best-effort */
+      }
+    }
   }
   until = now + DEGRADED_COOLDOWN_MS;
 }

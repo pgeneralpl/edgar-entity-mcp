@@ -1,5 +1,13 @@
 import { vi } from "vitest";
 import { CACHE_WRITE_SCRIPT, CACHE_WRITE_SCRIPT_SHA } from "../../src/core/cache.js";
+import {
+  STATS_FLUSH_SCRIPT,
+  STATS_FLUSH_SCRIPT_SHA,
+  STATS_READ_SCRIPT,
+  STATS_READ_SCRIPT_SHA,
+  STATS_SALT_SCRIPT,
+  STATS_SALT_SCRIPT_SHA,
+} from "../../src/core/stats.js";
 
 export const FAKE = "https://fake-upstash.test";
 
@@ -79,6 +87,76 @@ export function fakeUpstash() {
     kv.set(vkey, { v: args[4]!, ttl: ex });
     return [1, t];
   };
+  /** Structures used by the stats scripts: hashes, HyperLogLogs (exact sets here) and sorted sets. */
+  const hashes = new Map<string, Map<string, number>>();
+  const hlls = new Map<string, Set<string>>();
+  const zsets = new Map<string, Map<string, number>>();
+  /** Absolute EXPIREAT (unix seconds) set by the stats flush script, per key. */
+  const expireAts = new Map<string, number>();
+  /** JS port of STATS_FLUSH_SCRIPT in src/core/stats.ts (same semantics and same inner commands). */
+  const statsFlushScript = (keys: string[], args: string[]): unknown => {
+    const [c, u, cl] = keys as [string, string, string];
+    const [exp, cap, nm, nc] = args.slice(0, 4).map(Number) as [number, number, number, number];
+    let i = 4;
+    if (nm > 0) {
+      inner("PFADD");
+      const set = hlls.get(u) ?? new Set<string>();
+      args.slice(i, i + nm).forEach((m) => set.add(m));
+      hlls.set(u, set);
+      inner("EXPIREAT");
+      expireAts.set(u, exp);
+    }
+    i += nm;
+    if (nc > 0) {
+      const z = zsets.get(cl) ?? new Map<string, number>();
+      for (let j = i; j < i + 2 * nc; j += 2) {
+        inner("ZINCRBY");
+        z.set(args[j]!, (z.get(args[j]!) ?? 0) + Number(args[j + 1]));
+      }
+      inner("ZCARD");
+      if (z.size > cap) {
+        inner("ZREMRANGEBYRANK");
+        const asc = [...z].sort((a, b) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1));
+        asc.slice(0, z.size - cap).forEach(([k]) => z.delete(k));
+      }
+      zsets.set(cl, z);
+      inner("EXPIREAT");
+      expireAts.set(cl, exp);
+    }
+    i += 2 * nc;
+    if (i < args.length) {
+      const h = hashes.get(c) ?? new Map<string, number>();
+      for (let j = i; j < args.length; j += 2) {
+        inner("HINCRBY");
+        h.set(args[j]!, (h.get(args[j]!) ?? 0) + Number(args[j + 1]));
+      }
+      hashes.set(c, h);
+      inner("EXPIREAT");
+      expireAts.set(c, exp);
+    }
+    return 1;
+  };
+  const statsSaltScript = (keys: string[], args: string[]): unknown => {
+    inner("GET");
+    const cur = kv.get(keys[0]!);
+    if (cur) return cur.v;
+    inner("SET");
+    kv.set(keys[0]!, { v: args[0]!, ttl: Number(args[1]) });
+    return args[0];
+  };
+  const statsReadScript = (keys: string[], args: string[]): unknown => {
+    const top = Number(args[0]);
+    const out: unknown[] = [];
+    for (let i = 0; i < keys.length; i += 3) {
+      inner("HGETALL");
+      inner("PFCOUNT");
+      inner("ZREVRANGE");
+      const h = hashes.get(keys[i]!) ?? new Map();
+      const z = [...(zsets.get(keys[i + 2]!) ?? new Map<string, number>())].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? 1 : -1)).slice(0, top);
+      out.push([[...h].flatMap(([k, v]) => [k, String(v)]), hlls.get(keys[i + 1]!)?.size ?? 0, z.flatMap(([k, v]) => [k, String(v)])]);
+    }
+    return out;
+  };
   const exec = (cmd: unknown[]): unknown => {
     commands.push(cmd);
     billed.n++;
@@ -124,6 +202,9 @@ export function fakeUpstash() {
         const keys = a.slice(2, 2 + nkeys);
         const args = a.slice(2 + nkeys);
         if (a[0] === CACHE_WRITE_SCRIPT_SHA || a[0] === CACHE_WRITE_SCRIPT) return cacheWriteScript(keys, args);
+        if (a[0] === STATS_FLUSH_SCRIPT_SHA || a[0] === STATS_FLUSH_SCRIPT) return statsFlushScript(keys, args);
+        if (a[0] === STATS_SALT_SCRIPT_SHA || a[0] === STATS_SALT_SCRIPT) return statsSaltScript(keys, args);
+        if (a[0] === STATS_READ_SCRIPT_SHA || a[0] === STATS_READ_SCRIPT) return statsReadScript(keys, args);
         if (args.length === 5) {
           // @upstash/ratelimit tokenBucket: HMGET + HSET + PEXPIRE when a token is granted.
           inner("HMGET");
@@ -178,6 +259,6 @@ export function fakeUpstash() {
     const status = !isBatch && "error" in out ? 400 : 200;
     return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
   });
-  return { commands, kv, fetchStub, state, billed, internal };
+  return { commands, kv, fetchStub, state, billed, internal, hashes, hlls, zsets, expireAts };
 }
 

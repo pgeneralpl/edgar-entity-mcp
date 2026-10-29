@@ -78,8 +78,14 @@ describe("search_company", () => {
 describe("lookup_business_entity pagination and totals", () => {
   const nyRows = (n: number, from = 0) =>
     Array.from({ length: n }, (_, i) => ({ dos_id: String(from + i), current_entity_name: `TIFFANY ${from + i} LLC`, entity_type: "DOMESTIC LIMITED LIABILITY COMPANY" }));
+  interface StateOut { count: number; offset: number; has_more: boolean; next_offset?: number; total?: number; query_url: string }
+  interface LookupOut extends Omit<StateOut, "query_url"> {
+    results: { entity_id: string }[];
+    by_state: Record<"NY" | "OR", StateOut>;
+    active_only_note?: string;
+  }
   const run = (a: Record<string, unknown>) =>
-    lookupBusinessEntity.run(lookupBusinessEntity.inputSchema.parse({ name: "Tiffany", states: ["NY"], ...a })) as Promise<Record<string, any>>;
+    lookupBusinessEntity.run(lookupBusinessEntity.inputSchema.parse({ name: "Tiffany", states: ["NY"], ...a })) as Promise<LookupOut>;
 
   it("pages with $offset/$limit+1 and reports has_more/next_offset", async () => {
     stub((u) => {
@@ -113,11 +119,11 @@ describe("lookup_business_entity pagination and totals", () => {
     // 3 rows per entity, 7 entities, ordered by entity.
     const all = Array.from({ length: 21 }, (_, i) => ({ registry_number: String(100 + Math.floor(i / 3)), business_name: `TIFFANY ${Math.floor(i / 3)} LLC`, associated_name_type: "MAILING ADDRESS" }));
     stub((u) => all.slice(0, Number(u.searchParams.get("$limit"))));
-    const p1 = (await run({ states: ["OR"], limit: 2 })) as Record<string, any>;
+    const p1 = await run({ states: ["OR"], limit: 2 });
     expect(p1.results.map((e: { entity_id: string }) => e.entity_id)).toEqual(["100", "101"]);
     expect(p1.by_state.OR).toMatchObject({ has_more: true, next_offset: 2 });
     expect(new URL(p1.by_state.OR.query_url).searchParams.get("$offset")).toBeNull(); // window from the start
-    const p4 = (await run({ states: ["OR"], limit: 2, offset: 6 })) as Record<string, any>;
+    const p4 = await run({ states: ["OR"], limit: 2, offset: 6 });
     expect(p4.results.map((e: { entity_id: string }) => e.entity_id)).toEqual(["106"]);
     expect(p4).toMatchObject({ has_more: false, total: 7 });
   });
