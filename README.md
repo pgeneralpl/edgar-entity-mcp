@@ -1,8 +1,8 @@
 # edgar-entity-mcp
 
-[![npm](https://img.shields.io/npm/v/edgar-entity-mcp.svg)](https://www.npmjs.com/package/edgar-entity-mcp) [![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![npm](https://img.shields.io/npm/v/edgar-entity-mcp.svg)](https://www.npmjs.com/package/edgar-entity-mcp) [![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE) [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.pgeneralpl%2Fedgar--entity--mcp-blue)](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.pgeneralpl/edgar-entity-mcp)
 
-Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · npm: https://www.npmjs.com/package/edgar-entity-mcp · MCP Registry: [`io.github.pgeneralpl/edgar-entity-mcp`](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.pgeneralpl/edgar-entity-mcp)
+Homepage: https://edgar-entity-mcp.vercel.app/ · Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · npm: https://www.npmjs.com/package/edgar-entity-mcp · MCP Registry: [`io.github.pgeneralpl/edgar-entity-mcp`](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.pgeneralpl/edgar-entity-mcp)
 
 **US company research for AI agents, from official public data.** One MCP server that covers SEC EDGAR (filings, XBRL financials, Form 4 insider trades, cross-company comparisons) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA). Responses are compact JSON with source URLs, sized to keep token use low.
 
@@ -10,15 +10,21 @@ Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github
 - **Founders / sales / diligence**: "Is *Acme Widgets LLC* an active Colorado entity? Who is its registered agent?"
 - **Researchers**: clean 10-K/10-Q sections as text, normalized financial time series with the XBRL tag used for each metric.
 
-No API keys are needed for the data. SEC asks you to identify yourself with a User-Agent (see [SEC User-Agent](#sec-user-agent-and-rate-limits)).
+Free, open source (MIT) hobby project. The hosted endpoint is a **free beta with low limits**; there are no paid plans. Not affiliated with the SEC or any state.
 
-```
-npx -y edgar-entity-mcp        # stdio MCP server
-```
+## Quick start
+
+- **Hosted (free beta, no install, no key):** add `https://edgar-entity-mcp.vercel.app/mcp` as a remote (Streamable HTTP) MCP server. Anonymous use has low daily limits (see [Coverage & limits](#coverage--limits-free-beta)).
+- **Local (stdio, no quota):** `npx -y edgar-entity-mcp` with `SEC_USER_AGENT="Your Name you@example.com"` set. SEC asks every client to identify itself with a name and email (see [SEC User-Agent](#sec-user-agent-and-rate-limits)). Use a patched Node.js (22.23.4+ or 24.22.1+).
+- Restart your client, then ask: *"Compare Ford, GM and Tesla revenue for CY2023"* or *"Is Newmont Corporation registered in Colorado?"*
+
+Per-client config files are under [Install](#install). The data itself needs no API keys.
 
 ---
 
 ## Tools
+
+Ten read-only tools:
 
 | Tool | What it does | Source |
 |---|---|---|
@@ -36,6 +42,17 @@ npx -y edgar-entity-mcp        # stdio MCP server
 Also included: a `company_research_brief` **prompt** that runs the whole workflow, and an `edgar-entity://data-sources` **resource** (licenses).
 
 Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous name. Errors come back as `{"error":{"code","message","hint"}}` with `isError: true`. Ambiguous names return candidate CIKs.
+
+## Coverage & limits (free beta)
+
+| | |
+|---|---|
+| SEC EDGAR | All EDGAR filers: submissions, filings and documents, XBRL facts/concepts/frames, Form 4 |
+| States | NY, CO, OR, CT, PA (official open data). NY/OR/PA: active entities only; CO/CT include dissolved entities with status |
+| Not covered | Delaware (no open bulk dataset) and all other states; EDGAR full-text search; 13F (see [Roadmap](#roadmap)) |
+| Hosted limits | Free beta with low anonymous limits: 60 units/day per IP and 30/min (per instance); a call answered from cache costs 1 unit; shared daily caps per network and for all anonymous use. Not intended for bulk use. For heavier personal use, run it locally (no quota). Details: [Hosted quotas](#hosted-quotas-and-api-keys). |
+
+Not affiliated with the SEC or any state. Not investment, legal or credit advice. Not a consumer reporting agency; do not use it for FCRA purposes. State data may be incomplete or delayed. Hosted use is subject to the [Beta terms](https://edgar-entity-mcp.vercel.app/terms), [Privacy Policy](https://edgar-entity-mcp.vercel.app/privacy) and [Contact & Abuse](https://edgar-entity-mcp.vercel.app/abuse) pages.
 
 ### Example calls and real outputs (live data, trimmed)
 
@@ -105,7 +122,9 @@ Three ways to connect: the hosted endpoint `https://edgar-entity-mcp.vercel.app/
 
 Quick check: `npx -y edgar-entity-mcp --version`
 
-> **Node.js version (stdio users):** run the package on a patched Node.js — **22.23.4+ (22.x) or 24.22.1+ (24.x, recommended)**, or 26.12.1+. These releases (2026-10-21) fix CVE-2026-111497, a Brotli decoder out-of-bounds write that a malicious server response decoded by `fetch()` could trigger, plus TLS hostname-verification bypasses. Node.js 20 is end-of-life and will not get the fix. Check with `node -v`; the server prints a warning on stderr when started on an unpatched Node.js. The hosted endpoint runs on Vercel's managed Node.js 24.x runtime, which Vercel patches itself. `engines.node` is `24.x` (it pins the Vercel runtime), so npm prints an `EBADENGINE` notice on 22.x — that is expected and harmless on 22.23.4+.
+> **Node.js (stdio users):** run a patched Node.js, **22.23.4+ or 24.22.1+ (recommended)** or 26.12.1+. These releases (2026-10-21) fix CVE-2026-111497 (a Brotli decoder out-of-bounds write reachable through `fetch()`) and TLS hostname-verification bypasses; Node.js 20 is end-of-life and won't get the fix. Details: [CHANGELOG](CHANGELOG.md). The hosted endpoint runs on Vercel's managed, patched Node.js 24.x runtime.
+>
+> **npm version:** npm currently has **0.1.0** (`engines.node >=20`); the hosted endpoint runs **0.2.0** from `main`, which is not on npm yet. The 0.2.0 changes in the [CHANGELOG](CHANGELOG.md) (among them the unpatched-Node warning on stderr, refusing SEC calls without a real `SEC_USER_AGENT`, the registered-agent privacy defaults and the untrusted-text markers) reach `npx` users once 0.2.0 is published; until then, run from source (see [Self-host](#self-host-the-http-server) and [Development](#development)) to get them locally. From 0.2.0, `engines.node` is `24.x` (it pins the Vercel runtime), so npm prints an `EBADENGINE` notice on 22.x; that is expected and harmless on 22.23.4+.
 
 ### Claude Desktop / Claude Code / Cursor / Windsurf / VS Code (stdio via npx)
 
@@ -127,7 +146,7 @@ Quick check: `npx -y edgar-entity-mcp --version`
 
 ### Remote (Streamable HTTP)
 
-Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses Upstash Redis for a shared cache, a fleet-wide SEC budget of 6 req/s, and per-client quotas (see [Hosted quotas](#hosted-quotas-and-api-keys)).
+Hosted endpoint (free beta, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses Upstash Redis for a shared cache, a fleet-wide SEC budget of 6 req/s, and per-client quotas (see [Hosted quotas](#hosted-quotas-and-api-keys)).
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
@@ -201,7 +220,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | Client | Per minute | Per day (UTC) |
 |---|---|---|
 | Anonymous (per IP, IPv6 per /64) | 30 (per instance) | 60 |
-| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 60 (4× the per-IP cap = 240, capped at 10% of the global cap) |
+| All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 60 (the lower of 4× the per-IP cap and 10% of the global anonymous cap) |
 | All anonymous clients together | – | 600 soft; then 10 per IP, up to 900 hard |
 | Free API key | 120 (per instance) | 500 |
 
@@ -328,9 +347,9 @@ Rate limiting keeps **only integer counters** in Redis, under hashed identifiers
 - Per-minute limits are kept in process memory only (70 s) and never written to Redis.
 - `/health` reports this configuration under `quotas.state`.
 
-## Required configuration before resuming the hosted deployment
+## Production configuration (operators)
 
-Set these in the Vercel project (Production and Preview) before taking the deployment out of pause. With Redis configured, the server refuses to serve (HTTP 503, `/health` → `misconfigured`) until `IP_HASH_SALT` and `API_KEY_SECRET` are valid.
+The hosted deployment is live at https://edgar-entity-mcp.vercel.app/mcp. This is the configuration it, or any self-hosted deployment with Redis, needs. With Redis configured, the server refuses to serve (HTTP 503, `/health` → `misconfigured`) until `IP_HASH_SALT` and `API_KEY_SECRET` are valid.
 
 | Variable | Value |
 |---|---|
@@ -360,11 +379,10 @@ SEC's [fair-access policy](https://www.sec.gov/search-filings/edgar-search-assis
 - retries 429/5xx with exponential backoff and respects `Retry-After`;
 - deduplicates identical in-flight requests and caches with TTLs: tickers 24h, submissions 10 min, companyfacts/concepts 6h, frames 12h, filing documents 24h in process memory (raw documents are never written to Redis; processed text under 256 KB and parsed Form 4s are shared for 24h), state searches 1h. No Redis cache entry lives longer than 24h.
 
-## Monetization hooks (no billing yet)
+## Library hooks (self-hosters)
 
 - **HTTP gate**: self-verifying keys registered in Redis (`scripts/create-key.ts` / `scripts/delete-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401.
-- **Per-call metering**: `setUsageHooks({ beforeCall, afterCall })` (exported from the package). `beforeCall` receives `{tool, transport, apiKey, clientId, principal, args}`; throwing a `ToolError` rejects the call with that code (anything else becomes `UNAUTHORIZED`). The built-in quota hook runs first. `afterCall` receives `{ok, ms, errorCode, responseChars}`, which is enough for pay-per-call or per-token pricing.
-- Suggested tiers: free (stdio or keyless HTTP, cached), Pro (API key, higher limits, bulk/paginated exports), Team (webhooks for new filings or insider trades).
+- **Usage hooks for custom metering or logging**: `setUsageHooks({ beforeCall, afterCall })` (exported from the package). `beforeCall` receives `{tool, transport, apiKey, clientId, principal, args}`; throwing a `ToolError` rejects the call with that code (anything else becomes `UNAUTHORIZED`). The built-in quota hook runs first. `afterCall` receives `{ok, ms, errorCode, responseChars}`.
 
 ## Data sources & licenses
 
@@ -417,7 +435,6 @@ npx @modelcontextprotocol/inspector --cli node dist/stdio.js --method tools/list
 - Webhooks/subscriptions for new filings and insider trades (MCP events)
 - Segment and geographic revenue (XBRL dimensions via the Financial Statement datasets)
 - MCPB bundle for one-click Claude Desktop install (a `manifest.json` is included and validated)
-- Hosted plan: API keys, quotas and usage dashboard (the hooks already exist)
 
 ## License
 
