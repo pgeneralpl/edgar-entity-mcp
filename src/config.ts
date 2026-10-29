@@ -24,7 +24,7 @@ export interface Config {
   quota: {
     anonPerMinute: number;
     anonPerDay: number;
-    /** Per /24 (IPv6 /48) daily cap; never more than 10% of anonGlobalPerDay. */
+    /** Per /24 (IPv6 /48) daily cap; default 4x anonPerDay, never more than 10% of anonGlobalPerDay. */
     anonNetworkPerDay: number;
     /** Soft daily cap for all anonymous callers together; past it, each IP still gets anonTricklePerDay. */
     anonGlobalPerDay: number;
@@ -80,7 +80,12 @@ export function isValidSecUserAgent(ua: string | undefined): boolean {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const ua = env.SEC_USER_AGENT?.trim();
   const anonGlobal = num(env.QUOTA_ANON_GLOBAL_PER_DAY, 600);
+  const anonPerDay = num(env.QUOTA_ANON_PER_DAY, 60);
+  // Per-/24 cap: ~4x the per-IP cap (room for a few users behind one NAT / CGNAT range), but never more
+  // than 10% of the global anonymous budget, so one network cannot drain the shared budget. The 10% bound
+  // is a ceiling: with the defaults (60/IP, 600 global) it is the lower value and applies (min(240, 60) = 60).
   const netMax = Math.max(1, Math.ceil(anonGlobal * 0.1));
+  const netDefault = Math.min(4 * anonPerDay, netMax);
   return {
     secUserAgent: ua || DEFAULT_SEC_USER_AGENT,
     secUserAgentIsDefault: !ua,
@@ -104,8 +109,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     requireApiKey: env.MCP_REQUIRE_API_KEY === "1" || env.MCP_REQUIRE_API_KEY === "true",
     quota: {
       anonPerMinute: num(env.QUOTA_ANON_PER_MINUTE, 30),
-      anonPerDay: num(env.QUOTA_ANON_PER_DAY, 60),
-      anonNetworkPerDay: Math.min(num(env.QUOTA_ANON_NETWORK_PER_DAY, netMax), netMax),
+      anonPerDay,
+      anonNetworkPerDay: Math.min(num(env.QUOTA_ANON_NETWORK_PER_DAY, netDefault), netMax),
       anonGlobalPerDay: anonGlobal,
       anonGlobalHardPerDay: Math.max(anonGlobal, num(env.QUOTA_ANON_GLOBAL_HARD_PER_DAY, Math.ceil(anonGlobal * 1.5))),
       anonTricklePerDay: num0(env.QUOTA_ANON_TRICKLE_PER_DAY, 10),

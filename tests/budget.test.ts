@@ -92,6 +92,28 @@ describe("billed Upstash commands per quota check", () => {
     expect(loadConfig({}).quota).toMatchObject({ anonPerDay: 60, anonGlobalPerDay: 600, anonNetworkPerDay: 60, anonGlobalHardPerDay: 900, anonTricklePerDay: 10, keyPerDay: 500 });
   });
 
+  it("per-/24 default is 4x the per-IP cap, bounded by 10% of the global anonymous budget", () => {
+    // Defaults: 4 x 60 = 240 > 10% of 600 = 60, so the 10% ceiling applies.
+    expect(loadConfig({}).quota.anonNetworkPerDay).toBe(60);
+    // Global budget large enough: the 4x per-IP default applies.
+    expect(loadConfig({ QUOTA_ANON_GLOBAL_PER_DAY: "3000" }).quota.anonNetworkPerDay).toBe(240);
+    expect(loadConfig({ QUOTA_ANON_GLOBAL_PER_DAY: "3000", QUOTA_ANON_PER_DAY: "50" }).quota.anonNetworkPerDay).toBe(200);
+    // Exactly at the crossover (10% of 2,400 = 240 = 4 x 60).
+    expect(loadConfig({ QUOTA_ANON_GLOBAL_PER_DAY: "2400" }).quota.anonNetworkPerDay).toBe(240);
+    expect(loadConfig({ QUOTA_ANON_GLOBAL_PER_DAY: "2000" }).quota.anonNetworkPerDay).toBe(200);
+    // An explicit value is honoured below the ceiling and clamped above it.
+    expect(loadConfig({ QUOTA_ANON_GLOBAL_PER_DAY: "3000", QUOTA_ANON_NETWORK_PER_DAY: "120" }).quota.anonNetworkPerDay).toBe(120);
+    expect(loadConfig({ QUOTA_ANON_GLOBAL_PER_DAY: "3000", QUOTA_ANON_NETWORK_PER_DAY: "1000" }).quota.anonNetworkPerDay).toBe(300);
+  });
+
+  it("per-/24 cap at 4x per-IP: four full IPs fit in one /24, a fifth is refused (scope network)", async () => {
+    env({ QUOTA_ANON_GLOBAL_PER_DAY: "3000", QUOTA_ANON_PER_MINUTE: "100000" }); // /24 = min(4 x 60, 300) = 240
+    const store = new UpstashQuotaStore(redis);
+    for (let ip = 0; ip < 4; ip++) for (let i = 0; i < 60; i++) await chargeQuota(anon(ip, 9), "search_company", {}, store);
+    await expect(chargeQuota(anon(4, 9), "search_company", {}, store)).rejects.toMatchObject({ details: { scope: "network" } });
+    await expect(chargeQuota(anon(4, 10), "search_company", {}, store)).resolves.toBeUndefined(); // other /24 unaffected
+  });
+
   it("H2: global cap is soft — past it every IP still gets a 10-unit trickle, up to the hard ceiling", async () => {
     env({ QUOTA_ANON_GLOBAL_PER_DAY: "200", QUOTA_ANON_GLOBAL_HARD_PER_DAY: "230", QUOTA_ANON_PER_MINUTE: "1000" }); // /24 = 20
     const store = new UpstashQuotaStore(redis);

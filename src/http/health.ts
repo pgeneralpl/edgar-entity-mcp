@@ -37,8 +37,7 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
       state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, api_key_secret: c.apiKeySecret ? "env" : "unset (minted keys disabled)", day_counter_ttl_hours: 25, minute_limits: "in memory per instance (not stored)" },
     },
     sec_user_agent_configured: c.secUserAgentValid,
-    // Only whether the runtime has the 2026-10-21 Node.js security fixes; the exact version is not exposed.
-    node_runtime_patched: isPatchedNode(),
+    // Runtime version / patch state is not public (it tells attackers which CVEs apply); see ?deep=1.
     auth_required: c.requireApiKey,
     states: SUPPORTED_STATES,
   };
@@ -78,31 +77,38 @@ function secretMatches(given: string | null, secret: string | undefined): boolea
   return timingSafeEqual(a, b);
 }
 
+const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store" };
+
 /**
- * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds a Redis PING and today's cache-write budget state.
- * Without a matching secret the deep check is silently skipped. Errors are never echoed.
+ * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds the Node.js runtime version and patch
+ * state, a Redis PING and today's cache-write budget state. Without a matching secret (or with
+ * HEALTH_SECRET unset) `?deep=1` is refused with 401 and no health data. Errors are never echoed.
  */
 export async function healthResponse(req?: Request, env: NodeJS.ProcessEnv = process.env): Promise<Response> {
+  const deep = !!req && new URL(req.url).searchParams.get("deep") === "1";
+  if (req && deep && !secretMatches(req.headers.get("x-health-secret"), loadConfig(env).healthSecret)) {
+    return new Response(JSON.stringify({ error: "unauthorized", message: "deep health requires a valid x-health-secret header" }), {
+      status: 401,
+      headers: JSON_HEADERS,
+    });
+  }
   const body: Record<string, unknown> = healthPayload(env);
-  if (req && new URL(req.url).searchParams.get("deep") === "1") {
-    if (!secretMatches(req.headers.get("x-health-secret"), loadConfig(env).healthSecret)) {
-      body.deep = "skipped (requires x-health-secret)";
-    } else {
-      const redis = getRedis();
-      if (redis) body.redis_write_budget = writeBudgetDetail();
-      if (!redis) body.redis = "not configured";
-      else {
-        const t0 = Date.now();
-        try {
-          body.redis = { ok: (await redis.ping()) === "PONG", ms: Date.now() - t0 };
-        } catch (e) {
-          logError("health-redis", e);
-          body.redis = { ok: false };
-        }
+  if (deep) {
+    body.node_version = process.version;
+    // Whether the runtime has the 2026-10-21 Node.js security fixes (see src/core/nodeVersion.ts).
+    body.node_runtime_patched = isPatchedNode();
+    const redis = getRedis();
+    if (redis) body.redis_write_budget = writeBudgetDetail();
+    if (!redis) body.redis = "not configured";
+    else {
+      const t0 = Date.now();
+      try {
+        body.redis = { ok: (await redis.ping()) === "PONG", ms: Date.now() - t0 };
+      } catch (e) {
+        logError("health-redis", e);
+        body.redis = { ok: false };
       }
     }
   }
-  return new Response(JSON.stringify(body), {
-    headers: { "content-type": "application/json", "cache-control": "no-store" },
-  });
+  return new Response(JSON.stringify(body), { headers: JSON_HEADERS });
 }

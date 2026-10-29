@@ -9,7 +9,7 @@ import { ToolError, toToolError } from "../src/core/errors.js";
 import { wrapUntrusted, UNTRUSTED_BEGIN, UNTRUSTED_END } from "../src/core/untrusted.js";
 import { stripInvisible } from "../src/sec/documents.js";
 import { createHttpHandler } from "../src/http/handler.js";
-import { healthResponse } from "../src/http/health.js";
+import { healthPayload, healthResponse } from "../src/http/health.js";
 import { hostAllowed, originAllowed } from "../src/http/node-server.js";
 import { STATE_SOURCES, looksLikeOrganization } from "../src/states/registry.js";
 import { applyPrivacy, parseSuppressions, resetSuppressionCache } from "../src/states/suppression.js";
@@ -278,11 +278,36 @@ describe("H4: untrusted filing text", () => {
 describe("M3/M4/L1: health gating, host checks, generic errors", () => {
   it("only runs deep health with the shared secret and never leaks error text", async () => {
     const env = { HEALTH_SECRET: "s3cret" } as NodeJS.ProcessEnv;
-    const anon = (await (await healthResponse(new Request("https://x/health?deep=1"), env)).json()) as Record<string, unknown>;
-    expect(anon.deep).toMatch(/skipped/);
+    const anonRes = await healthResponse(new Request("https://x/health?deep=1"), env);
+    expect(anonRes.status).toBe(401);
+    expect(anonRes.headers.get("cache-control")).toBe("no-store");
+    const anon = (await anonRes.json()) as Record<string, unknown>;
+    expect(anon.error).toBe("unauthorized");
     expect(anon.redis).toBeUndefined();
-    const ok = (await (await healthResponse(new Request("https://x/health?deep=1", { headers: { "x-health-secret": "s3cret" } }), env)).json()) as Record<string, unknown>;
+    expect(anon.status).toBeUndefined(); // no health data at all on a refused deep check
+    const wrong = await healthResponse(new Request("https://x/health?deep=1", { headers: { "x-health-secret": "s3cre" } }), env);
+    expect(wrong.status).toBe(401);
+    // HEALTH_SECRET unset: deep checks are disabled, so every ?deep=1 is refused.
+    const unset = await healthResponse(new Request("https://x/health?deep=1", { headers: { "x-health-secret": "" } }), {} as NodeJS.ProcessEnv);
+    expect(unset.status).toBe(401);
+    const okRes = await healthResponse(new Request("https://x/health?deep=1", { headers: { "x-health-secret": "s3cret" } }), env);
+    expect(okRes.status).toBe(200);
+    const ok = (await okRes.json()) as Record<string, unknown>;
     expect(ok.redis).toBe("not configured");
+    expect(ok.node_version).toBe(process.version);
+    expect(typeof ok.node_runtime_patched).toBe("boolean");
+  });
+  it("public /health exposes neither the Node.js version nor its patch state", async () => {
+    const env = { HEALTH_SECRET: "s3cret" } as NodeJS.ProcessEnv;
+    for (const url of ["https://x/health", "https://x/health?deep=0"]) {
+      const res = await healthResponse(new Request(url), env);
+      expect(res.status).toBe(200);
+      const text = await res.text();
+      expect(JSON.parse(text).status).toBe("ok");
+      expect(text).not.toMatch(/node_runtime_patched|node_version/);
+      expect(text).not.toContain(process.version);
+    }
+    expect(JSON.stringify(healthPayload({} as NodeJS.ProcessEnv))).not.toMatch(/node_runtime_patched|node_version/);
   });
   it("node-server host/origin allowlists", () => {
     const hosts = ["localhost", "127.0.0.1", "[::1]"];
