@@ -294,7 +294,7 @@ So with the defaults: the anonymous tier uses at most ~38 % of the 50 GB/month, 
 
 With Redis configured and `STATS_ENABLED` not `0`, the HTTP server keeps **aggregate** counters per UTC day (`src/core/stats.ts`). Every write sets `EXPIREAT` = end of that UTC day + **30 days**, so each key always has a TTL (no relative TTL that a later write could extend) and disappears 30 days after its day.
 
-**Where it runs.** Stats are recorded only when `VERCEL_ENV === "production"`, or when the server is not on Vercel at all (no `VERCEL` env var, i.e. self-hosted). Preview and development deployments on Vercel never write stats, even though they currently see the same Upstash database (see the note below). **Self-hosted HTTP servers with Upstash configured have stats on by default**; set `STATS_ENABLED=false` to turn them off. stdio (`npx`) never records anything.
+**Where it runs.** Stats are recorded only when `VERCEL_ENV === "production"`, or when the server is not on Vercel at all (no `VERCEL` env var, i.e. self-hosted). Preview and development deployments on Vercel never write stats (and no longer have Redis at all; see the note in [Required configuration](#required-configuration-before-resuming-the-hosted-deployment)). **Self-hosted HTTP servers with Upstash configured have stats on by default**; set `STATS_ENABLED=false` to turn them off. stdio (`npx`) never records anything.
 
 | Key | Type | Content |
 |---|---|---|
@@ -359,9 +359,9 @@ Rate limiting keeps **only integer counters** in Redis, under hashed identifiers
 
 ## Required configuration before resuming the hosted deployment
 
-Set these in the Vercel project's **Production** environment before taking the deployment out of pause (the Preview environment currently carries copies of the secrets too; stats are only ever written by Production). With Redis configured, the server refuses to serve (HTTP 503, `/health` → `misconfigured`) until `IP_HASH_SALT` and `API_KEY_SECRET` are valid.
+Set these in the Vercel project's **Production** environment before taking the deployment out of pause (the Preview environment carries copies of the non-Redis secrets too, but has no Redis; see the note below). With Redis configured, the server refuses to serve (HTTP 503, `/health` → `misconfigured`) until `IP_HASH_SALT` and `API_KEY_SECRET` are valid.
 
-> **Known pre-existing issue (owner decision pending):** the Upstash integration variables (`KV_REST_API_URL`, `KV_REST_API_TOKEN`, `KV_URL`, `REDIS_URL`, `KV_REST_API_READ_ONLY_TOKEN`) are scoped to **Production, Preview and Development**. Preview deployments therefore use the production database for the cache, quota counters, API key records and the suppression set. Usage statistics are excluded by the `VERCEL_ENV` check above, but the other state is not. Re-scoping the KV variables to Production only (or giving Preview its own database) is a Vercel env change that has not been made.
+> **Redis is Production-only.** Since 2026-10-29 the Upstash integration variables (`KV_REST_API_URL`, `KV_REST_API_TOKEN`, `KV_URL`, `REDIS_URL`, `KV_REST_API_READ_ONLY_TOKEN`) are scoped to **Production only**. Preview and Development deployments run without Redis: they use the in-memory cache and in-memory (per-instance) limits and never read or write production data (cache, quota counters, API key records, suppression set or usage statistics). **Caveat:** re-connecting or re-configuring the Upstash integration in Vercel can re-add the Preview/Development scopes, so re-check `vercel env ls` after any integration change and remove them again if they reappear.
 
 | Variable | Value |
 |---|---|
