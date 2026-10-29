@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Privacy Policy - edgar-entity-mcp</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="font-family:system-ui;max-width:720px;margin:40px auto;padding:0 16px">
+<p><small>Last updated: 2026-10-29</small></p>
+<h1>Privacy Policy</h1>
+<p><small><a href="/">edgar-entity-mcp</a> · <a href="/terms">Beta terms</a> · <a href="/privacy">Privacy</a> · <a href="/abuse">Contact &amp; Abuse</a></small></p>
+<p>This Privacy Policy explains how personal data is processed in connection with the hosted edgar-entity-mcp service (the "Service"). It covers two groups of people:</p>
+<ul>
+<li><strong>A. API users</strong>: people and organizations that call the Service directly or through an AI agent; and</li>
+<li><strong>B. People named in public records</strong>: individuals who appear in the SEC and state registry data that the Service returns.</li>
+</ul>
+<p>If you run the open-source npm package or the code yourself, your requests go directly from your machine to the SEC and state portals. We do not receive them, and this policy does not apply to that use.</p>
+
+<h2>Controller</h2>
+<p>The controller is the operator of the Service, reachable at <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a>. We have not appointed a data protection officer.</p>
+
+<h2>A. API users</h2>
+<h3>What we process</h3>
+<ul>
+<li><strong>Request contents.</strong> The tool you call and its arguments, such as a company name, ticker, CIK or business name. These are processed to answer your request. Our application does not write tool arguments to its usage logs. However, the upstream URLs built from your arguments, such as a registry search for a business name, are used as cache keys, and the upstream responses are cached for the periods listed below. In our shared cache (Upstash Redis) the cache keys are stored only as SHA-256 hashes, so key names do not reveal what was searched. Free-text company-name lookups used to resolve tickers are cached only in the memory of the serving instance, never in the shared cache.</li>
+<li><strong>Usage logs.</strong> Per-call usage logging is currently disabled on the hosted Service. If we enable it, each tool call writes one log line to our hosting provider's function logs containing only: timestamp, tool name, transport, success or failure and error code, duration, approximate response size, the access tier (anonymous or API key), and the rate-limit identifier described below (a daily-rotating hash of your IP address, or your API key's ID). Tool arguments, API keys and raw IP addresses are never written to these lines.</li>
+<li><strong>API keys.</strong> API keys are optional and free. A key has the form <code>eem_&lt;id&gt;_&lt;signature&gt;</code> and is verified by its cryptographic signature. We do not store the key itself. For each issued key we store only its ID, its creation date and any custom limits, and no name, email address or other contact details. Your key request (for example a GitHub issue) is the only place that links you to a key, and we can delete the key record on request. There are currently no user accounts and no billing. We will update this policy before introducing any paid plan.</li>
+<li><strong>No accounts, no email addresses.</strong> Anyone can use the Service anonymously, without an API key, within a low per-IP limit. We do not create accounts and the Service does not ask for or collect email addresses or other contact details. If you email us, we use your message and address only to handle your request.</li>
+<li><strong>Technical and network data.</strong> Our hosting provider, Vercel, processes your IP address, request headers (such as User-Agent), request timestamps, request paths and similar connection data to deliver the Service, protect it (for example firewall, DDoS and abuse protection) and keep platform logs. Our application code never stores your raw IP address. It uses your IP address only in the form of a keyed hash (HMAC-SHA256 with a secret that changes every UTC day), computed for your IP address (IPv6: its /64) and for its enclosing network (IPv4 /24, IPv6 /48). These hashes are used only to apply rate limits and protect the Service from abuse. Hashes from different days cannot be linked to each other.</li>
+</ul>
+<p>The Service does not use cookies, analytics or advertising trackers. This website is a static page.</p>
+
+<h3>Purposes and legal basis</h3>
+<p>We process this data to operate and secure the Service, enforce rate limits and our <a href="/terms">beta terms</a>, debug errors, understand aggregate usage, and plan capacity and future pricing. The legal basis is our legitimate interest in providing a reliable, secure and abuse-free service (Art. 6(1)(f) GDPR).</p>
+
+<h3>Retention</h3>
+<ul>
+<li>Usage logs: none are currently written (usage logging is disabled). Function (runtime) logs, such as error messages, are kept by Vercel and are available to us for 1 hour on our current Vercel plan (Hobby).</li>
+<li>Vercel platform and network data, including IP addresses: retained by Vercel as described in <a href="https://vercel.com/legal/privacy-policy">Vercel's privacy policy</a>.</li>
+<li>Rate-limit data: daily counters stored in Upstash under the hashed identifiers described above (hashed IP address, hashed network, or API key ID) expire automatically after 25 hours. Per-minute counters and counters of failed API-key attempts are held only in the memory of the serving instance and expire after about 70 seconds and 10 minutes respectively.</li>
+<li>API key records: until the key is deleted.</li>
+<li>Cache entries: between 10 minutes and 24 hours depending on data type. State registry searches are cached for 1 hour; SEC company data for 10 minutes to 24 hours (filing lists 10 minutes, older filing history and financial data 6 hours, cross-company comparisons 12 hours, ticker lists 24 hours); processed SEC filing text and parsed Form 4 reports for 24 hours in the shared cache; and raw SEC filing documents for up to 24 hours, in the memory of the serving instance only. No shared-cache entry is kept for more than 24 hours, or past 01:00 UTC of the day after it was written. The total amount written to the shared cache is also capped by a daily write budget (64 MiB, about 67 MB, per UTC day); once it is used up, new responses are not stored in the shared cache until the next UTC day. Counters used to pace our requests to upstream sources, and the daily cache-write counter, are shared by all users and contain no personal data.</li>
+</ul>
+
+<h3>Processors and recipients</h3>
+<ul>
+<li><strong>Vercel Inc.</strong> (USA): hosting, serverless functions, network, logs. Functions run in region iad1 (Washington, D.C., USA).</li>
+<li><strong>Upstash, Inc.</strong> (USA): Redis cache, rate-limit counters, API key records and the suppression list described below, provisioned through Vercel. Database region: us-east-1 (USA).</li>
+<li><strong>Upstream sources</strong> (the SEC and state portals operated on Socrata / Tyler Technologies) receive the queries needed to answer your request, such as a company or business name. They are sent from our servers, not from your IP address.</li>
+</ul>
+<p>We do not sell your personal data. We may disclose data where required by law or to protect the Service and others from abuse.</p>
+
+<h3>International transfers</h3>
+<p>Our processors are based in, or process data in, the United States. Transfers rely on both companies' EU-U.S. DPF certification (Art. 45 GDPR). Upstash's DPA also incorporates the 2021/914 SCCs. You can ask us for more information.</p>
+
+<h2>B. People named in public records</h2>
+<p>This section is also our information notice under Art. 14 GDPR for personal data that we did not collect from you directly.</p>
+<h3>Sources</h3>
+<ul>
+<li>U.S. SEC EDGAR (<code>www.sec.gov</code>, <code>data.sec.gov</code>): company filings and Form 3/4/5 insider reports.</li>
+<li>State business registries published as open data: New York Department of State (data.ny.gov), Colorado Department of State (data.colorado.gov), Oregon Secretary of State (data.oregon.gov), Connecticut Secretary of the State (data.ct.gov) and Pennsylvania Department of State (data.pa.gov).</li>
+</ul>
+<h3>Categories of personal data</h3>
+<ul>
+<li>From SEC filings: names of insiders (officers, directors, 10% owners), their roles and relationships to the issuer, reported transactions and holdings, and any personal information that filers include in filing documents (for example executive names and biographies).</li>
+<li>From state registries: names and addresses of registered agents and of persons designated for service of process, and business, principal and mailing addresses. For small businesses these may be private addresses. Pennsylvania officer names are dropped by the Service. Some registries hold additional names that the Service does not return.</li>
+</ul>
+<p>We do not intentionally process special categories of personal data (Art. 9 GDPR).</p>
+<h3>How the data is processed</h3>
+<p>The Service does not maintain its own database of these records. It fetches data from the official source when a user asks, reformats it, returns it to that user with a link to the source, and caches the response temporarily (see Retention above, generally up to 1 hour for registry results and up to 24 hours for SEC filing documents).</p>
+<h3>Purposes and legal basis</h3>
+<p>We provide access to official public records for company research, due diligence, journalism and similar purposes. The legal basis is legitimate interests (Art. 6(1)(f) GDPR): ours, and those of our users and the public, in transparent and convenient access to information that the law requires to be public. Our safeguards include returning entity-level fields only, omitting some personal fields (names and addresses of individual registered agents, and related entity addresses, are withheld by default and released only to API-key holders who request them), blocking or limiting abusive use such as harassment, doxxing and FCRA-type use under our <a href="/terms">beta terms</a>, short cache periods, and handling objection requests as described below.</p>
+<h3>Recipients</h3>
+<p>Users of the Service who query the relevant company or entity, and our processors listed above.</p>
+<h3>Notice</h3>
+<p>We cannot identify or contact the individuals in these records without collecting more data about them. Contacting them individually would therefore be impossible or require disproportionate effort (Art. 14(5)(b) GDPR). We make this information public on this page instead.</p>
+<h3>Your rights, objection and suppression</h3>
+<p>You have the right to object to this processing at any time on grounds relating to your particular situation (Art. 21 GDPR), and to request access, rectification, erasure or restriction. Email <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a> with the subject "Data subject request". Include the state or SEC source, the entity or filing concerned, and the data you want removed or corrected. We may ask for information to verify your request. If your objection is upheld, we add the entity or name to the Service's suppression list. From then on, state registry responses, including cached ones, withhold the registered-agent, service-of-process, address and NY location-name fields of a suppressed entity. For a suppressed person's name, they withhold any registered agent or service-of-process contact whose name or address contains it, and the same personal fields of any entity whose name, NY location name or principal or mailing address contains it (with the entity name itself shown as "[withheld]" when it contains the name). The suppression list does not filter SEC filings or Form 4 insider reports, which are returned as filed. All running instances apply the updated list within 10 minutes. Note that we cannot change the official source records. Corrections there must be made with the SEC, the filer or the relevant state agency.</p>
+
+<h2>Your rights (all groups)</h2>
+<p>Under the GDPR you have the right to access your personal data, have it rectified or erased, restrict its processing, object to processing based on legitimate interests, and, where applicable, receive it in a portable format. To exercise these rights, email <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a>. We will reply within one month, which may be extended as permitted by law. Note that we usually cannot link usage-log entries to a specific person.</p>
+<p>You also have the right to lodge a complaint with a supervisory authority. In Poland this is the President of the Personal Data Protection Office (Prezes Urzędu Ochrony Danych Osobowych, UODO), ul. Stawki 2, 00-193 Warszawa, <a href="https://uodo.gov.pl">uodo.gov.pl</a>. You can also complain to the authority in your EU country of residence or work.</p>
+
+<h2>Changes</h2>
+<p>We may update this policy. The "Last updated" date at the top shows the current version.</p>
+<p><a href="https://github.com/pgeneralpl/edgar-entity-mcp">Source on GitHub</a> · MIT · <a href="/terms">Beta terms</a></p>
+</body></html>

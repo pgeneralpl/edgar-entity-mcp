@@ -302,6 +302,8 @@ Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (on
 
 ## Privacy and personal data
 
+The hosted server's [Privacy Policy](https://edgar-entity-mcp.vercel.app/privacy) ([source](public/privacy.html)), [Beta terms](https://edgar-entity-mcp.vercel.app/terms) ([source](public/terms.html)) and [Contact & Abuse](https://edgar-entity-mcp.vercel.app/abuse) ([source](public/abuse.html)) pages are served from `public/`. The only contact is patryk.general@mail.grokbot.com.
+
 - Registered agents and service-of-process contacts are treated as **individuals unless the name ends with a legal-form suffix** (Inc, Corp, LLC, LLP, LP, Ltd, Company, "& Co", Bank, N.A., …) or is a known registered-agent service (CT Corporation, CSC, Cogency Global, …). "JOHN CHURCH", "JUDE LAW", "DAVID CO" and "JOHN SMITH PA" are individuals; ambiguous CO/PA/PC endings count as individual.
 - Individual agents are returned as `{ "kind": "individual", "withheld": true }`, and the entity's principal/mailing addresses (and NY location name) are withheld too (`addresses_withheld: true`), since for one-person businesses these are often a home address. `include_agent_details: true` reveals them **only for API-key callers** (and local stdio use); anonymous HTTP callers get a privacy note instead. Organizational agents are always shown.
 - Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Entity ids are normalized (case, punctuation, leading zeros). A suppressed name is matched as whole words in agent names and addresses **and** in the entity name, NY location name and principal/mailing addresses; any hit removes every personal field of that record, and a hit in the entity name (also matched with spaces removed, e.g. "JANEDOE HOLDINGS LLC") replaces the name with `[withheld]`. If Redis is configured but the suppression list cannot be loaded on a cold instance, state lookups are refused (before any registry request) rather than served without it.
@@ -419,4 +421,4 @@ npx @modelcontextprotocol/inspector --cli node dist/stdio.js --method tools/list
 
 ## License
 
-MIT for the code (see [LICENSE](LICENSE)). Data remains subject to each source's terms (see [DATA_SOURCES.md](DATA_SOURCES.md)).
+MIT for the code (see [LICENSE](LICENSE)). Use of the hosted server is subject to the [Beta terms](https://edgar-entity-mcp.vercel.app/terms). Data remains subject to each source's terms (see [DATA_SOURCES.md](DATA_SOURCES.md)).
