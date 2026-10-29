@@ -45,6 +45,22 @@ describe("vercel.json security headers", () => {
     expect(vercel.rewrites.map((r) => r.source)).toEqual(["/mcp", "/health", "/stats"]);
   });
 
+  it("serves /llms.txt as text/plain with nosniff, no CSP, and no rewrite or cleanUrls mapping", () => {
+    const h = headersFor("/llms.txt");
+    expect(h["content-type"]).toBe("text/plain; charset=utf-8");
+    expect(h["x-content-type-options"]).toBe("nosniff");
+    expect(h["x-frame-options"]).toBe("DENY");
+    expect(h["content-security-policy"]).toBeUndefined();
+    // cleanUrls only strips .html; no rewrite matches /llms.txt, so the static file in public/ is served as-is.
+    for (const r of vercel.rewrites) expect(new RegExp(`^${r.source}$`).test("/llms.txt"), r.source).toBe(false);
+    expect(headersFor("/llmsXtxt")["content-type"]).toBeUndefined(); // the dot is escaped
+    const txt = readFileSync(new URL("../public/llms.txt", import.meta.url), "utf8");
+    expect(txt.startsWith("# edgar-entity-mcp\n")).toBe(true);
+    expect(txt).toContain("https://edgar-entity-mcp.vercel.app/mcp");
+    for (const path of ["/privacy", "/terms", "/abuse"]) expect(txt).toContain(`https://edgar-entity-mcp.vercel.app${path}`);
+    expect(txt).not.toMatch(/<(script|html)\b/i);
+  });
+
   it("the HTML pages work under that CSP: no scripts, external styles, forms, frames, images or <base>", () => {
     const dir = new URL("../public/", import.meta.url);
     const pages = readdirSync(dir).filter((f) => f.endsWith(".html"));

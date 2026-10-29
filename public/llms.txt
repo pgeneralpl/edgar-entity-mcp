@@ -1,0 +1,48 @@
+# edgar-entity-mcp
+
+> Free, open-source (MIT) MCP (Model Context Protocol) server for researching US companies from official public data: SEC EDGAR filings, XBRL financials, Form 4 insider trades, cross-company comparisons, and Secretary of State business-entity registries for NY, CO, OR, CT and PA. The hosted endpoint is a free hobby beta with low limits and no paid plans. Not affiliated with the SEC or any state.
+
+## Connect
+- Remote endpoint (Streamable HTTP, no API key): https://edgar-entity-mcp.vercel.app/mcp
+- Local (stdio): `npx -y edgar-entity-mcp`, with the environment variable SEC_USER_AGENT set to your own name and email (e.g. `SEC_USER_AGENT="Jane Doe jane@example.com"`), as SEC requires. Use a patched Node.js (22.23.4+ or 24.22.1+). No quota when run locally.
+- Versions: the npm package may lag behind the hosted endpoint (currently npm has 0.1.0 and the hosted endpoint runs 0.2.0; see CHANGELOG.md for what differs).
+- Source code: https://github.com/pgeneralpl/edgar-entity-mcp
+- MCP Registry name: io.github.pgeneralpl/edgar-entity-mcp
+
+## Tools
+- search_company: find SEC registrants by name or ticker; returns CIK and tickers.
+- get_company_profile: EDGAR company profile (SIC/industry, addresses, fiscal year end, former names, latest 10-K/10-Q).
+- list_filings: list a company's SEC filings, filterable by form type (10-K, 10-Q, 8-K, ...) and date range.
+- get_filing_document: read the text of a filing document, with 10-K/10-Q item extraction and length-limited paging.
+- get_financials: key financial metrics normalized from XBRL, one row per fiscal period, including derived free cash flow and the XBRL tag used.
+- get_xbrl_concept: history of a single XBRL concept for one company.
+- compare_companies: compare companies on one metric for a given period (XBRL frames).
+- get_insider_trades: Form 4 insider transactions with insider role and plain-English meaning of transaction codes.
+- lookup_business_entity: search Secretary of State registries (official open data) by entity name or id.
+- list_supported_states: supported states, coverage caveats and data license terms.
+
+## State coverage
+- NY, OR, PA: active entities only. CO, CT: active and dissolved entities, with status.
+- Delaware and all other states are not covered. State data may be incomplete or delayed.
+
+## Limits (hosted, anonymous free beta)
+- 60 units per day per IP and 30 per minute; a call answered from cache costs 1 unit.
+- Shared daily budgets per network and for all anonymous use; when the shared budget is spent, only a small trickle per IP is allowed.
+- Not intended for bulk downloads; run it locally for heavier personal use.
+- Higher limits on request via a GitHub issue: https://github.com/pgeneralpl/edgar-entity-mcp/issues
+
+## Notes
+- Not affiliated with the SEC or any state. Not investment, legal or credit advice.
+- Not a consumer reporting agency; do not use for FCRA purposes.
+- Individual (natural-person) registered agents are withheld on the hosted endpoint.
+
+## Policies
+- Privacy: https://edgar-entity-mcp.vercel.app/privacy
+- Terms: https://edgar-entity-mcp.vercel.app/terms
+- Contact and abuse reports: https://edgar-entity-mcp.vercel.app/abuse
+- Contact: patryk.general@mail.grokbot.com
+
+## Docs
+- README: https://github.com/pgeneralpl/edgar-entity-mcp#readme
+- Operations and self-hosting: https://github.com/pgeneralpl/edgar-entity-mcp/blob/main/docs/OPERATIONS.md
+- Data sources and licenses: https://github.com/pgeneralpl/edgar-entity-mcp/blob/main/DATA_SOURCES.md
