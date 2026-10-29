@@ -50,7 +50,7 @@ Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous n
 | SEC EDGAR | All EDGAR filers: submissions, filings and documents, XBRL facts/concepts/frames, Form 4 |
 | States | NY, CO, OR, CT, PA (official open data). NY/OR/PA: active entities only; CO/CT include dissolved entities with status |
 | Not covered | Delaware (no open bulk dataset) and all other states; EDGAR full-text search; 13F (see [Roadmap](#roadmap)) |
-| Hosted limits | Free beta with low anonymous limits: 60 units/day per IP and 30/min (per instance); a call answered from cache costs 1 unit; shared daily caps per network and for all anonymous use. Not intended for bulk use. For heavier personal use, run it locally (no quota). Details: [Hosted quotas](#hosted-quotas-and-api-keys). |
+| Hosted limits | Free beta with low anonymous limits: 60 units/day per IP and 30/min (per instance); a call answered from cache costs 1 unit; shared daily caps per network and for all anonymous use. Not intended for bulk use. For heavier personal use, run it locally (no quota). Details: [Hosted quotas](#free-beta-limits-hosted-quotas). |
 
 Not affiliated with the SEC or any state. Not investment, legal or credit advice. Not a consumer reporting agency; do not use it for FCRA purposes. State data may be incomplete or delayed. Hosted use is subject to the [Beta terms](https://edgar-entity-mcp.vercel.app/terms), [Privacy Policy](https://edgar-entity-mcp.vercel.app/privacy) and [Contact & Abuse](https://edgar-entity-mcp.vercel.app/abuse) pages.
 
@@ -146,12 +146,12 @@ Quick check: `npx -y edgar-entity-mcp --version`
 
 ### Remote (Streamable HTTP)
 
-Hosted endpoint (free beta, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses Upstash Redis for a shared cache, a fleet-wide SEC budget of 6 req/s, and per-client quotas (see [Hosted quotas](#hosted-quotas-and-api-keys)).
+Hosted endpoint (free beta, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses Upstash Redis for a shared cache, a fleet-wide SEC budget of 6 req/s, and per-client quotas (see [Hosted quotas](#free-beta-limits-hosted-quotas)).
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
 ```
-For clients that only speak stdio: `"command": "npx", "args": ["-y", "mcp-remote", "https://edgar-entity-mcp.vercel.app/mcp"]`. With an API key, send `Authorization: Bearer <key>` or `x-api-key: <key>` (mcp-remote: `--header "Authorization: Bearer <key>"`).
+For clients that only speak stdio: `"command": "npx", "args": ["-y", "mcp-remote", "https://edgar-entity-mcp.vercel.app/mcp"]`.
 
 ### Self-host the HTTP server
 
@@ -173,6 +173,8 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 
 ## Environment variables
 
+The key-related variables (`API_KEY_SECRET`, `MCP_API_KEYS`, `MCP_REQUIRE_API_KEY`, `QUOTA_KEY_*`, `SEC_KEYED_RESERVED_RPS`, `REVOKED_KEY_IDS`, `KEY_REQUEST_URL`) are for self-hosters who choose to issue keys; see [Optional API keys](#optional-api-keys-self-hosters). The hosted beta does not issue keys.
+
 | Var | Default | Purpose |
 |---|---|---|
 | `SEC_USER_AGENT` | – (required) | **Set this** to your own `"<Name or Company> <email>"`, e.g. `"Acme Research jane@acme.com"`. SEC tools refuse to run (`CONFIG_ERROR`) while it is unset or a placeholder; state-registry tools still work. |
@@ -190,7 +192,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `DEGRADED_SEC_RPS` | `0.2` (max 2) | Per-instance SEC rate for API-key callers while Redis is unavailable or over its plan limit; `0` = refuse SEC calls. Anonymous callers are cache-only in that state. |
 | `MCP_API_KEYS` | – | Comma-separated static keys (accepted alongside hashed keys stored in Redis) |
 | `MCP_REQUIRE_API_KEY` | – | `1` rejects anonymous HTTP calls with 401 (0.1.x required a key whenever `MCP_API_KEYS` was set) |
-| `KEY_REQUEST_URL` | GitHub issue link | Shown in RATE_LIMITED hints as the place to request a free key |
+| `KEY_REQUEST_URL` | GitHub issue link | Link shown in `RATE_LIMITED` / 401 hints as the place to request a key (only relevant if you issue keys) |
 | `IP_HASH_SALT` | – (**required with Redis**) | Secret (≥32 random chars, e.g. `openssl rand -hex 32`) for the IP hash. The salt actually used is `HMAC-SHA256(IP_HASH_SALT, UTC date)`, so it rotates daily. With Redis configured and this missing, set to the old default `edgar-entity-mcp`, or shorter than 32 chars, the server refuses to start (node: exit 1; Vercel: every request gets 503 and `/health` says `misconfigured`). |
 | `API_KEY_SECRET` | – (**required with Redis**) | Secret (≥32 random chars, different from `IP_HASH_SALT`) used to sign API keys (`eem_<id>_<HMAC>`). Rotating it invalidates every minted key at once. Without Redis, minted keys are disabled. |
 | `REVOKED_KEY_IDS` | – | Comma-separated key ids (or full keys) refused immediately on every instance, without Redis — use for urgent revocation, including during degraded mode |
@@ -202,7 +204,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `MEMORY_CACHE_MB` / `REDIS_MAX_VALUE_BYTES` / `HTTP_TIMEOUT_MS` | 128 / 262144 / 25000 | Tuning (`REDIS_MAX_VALUE_BYTES` is the stored, compressed size) |
 | `HOST` / `ALLOWED_HOSTS` / `ALLOWED_ORIGINS` / `TRUST_PROXY` | `127.0.0.1` / – / – / – | Self-hosted node server only |
 
-## Hosted quotas and API keys
+## Free beta limits (hosted quotas)
 
 The hosted endpoint charges each tool call in **units** that approximate how many upstream requests it can trigger:
 
@@ -222,22 +224,12 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | Anonymous (per IP, IPv6 per /64) | 30 (per instance) | 60 |
 | All anonymous clients of one network (IPv4 /24, IPv6 /48) | – | 60 (the lower of 4× the per-IP cap and 10% of the global anonymous cap) |
 | All anonymous clients together | – | 600 soft; then 10 per IP, up to 900 hard |
-| Free API key | 120 (per instance) | 500 |
 
 **Reserve, then refund.** The table above is the *estimate* reserved before a call. After the call the server charges the actual cost — the number of upstream requests it made, at least 1 — and refunds the rest. A call answered from cache costs 1 unit, so cheap cached calls cannot exhaust the shared anonymous budget. Refunds are kept locally and folded into the next counter update, so they cost no Redis commands.
 
-Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`), the limit, and how to get a key. Running locally via `npx -y edgar-entity-mcp` has no quota.
+Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`) and the limit. Running locally via `npx -y edgar-entity-mcp` has no quota.
 
-Fair share of the upstream budget: `SEC_KEYED_RESERVED_RPS` (2 of the 6 SEC requests/s by default) is reserved for API-key callers, and each client may have at most `MAX_CONCURRENT_UPSTREAM_PER_CLIENT` (4) upstream fetches in flight. The SEC token bucket refills smoothly (one token every ~167 ms at 6 rps, burst 2).
-
-### API keys
-
-Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request). Keys look like `eem_<12-char id>_<24-hex HMAC>` and are **self-verifying**: the server checks the HMAC (keyed with `API_KEY_SECRET`) locally, so random or forged keys are rejected without touching Redis, and a client sending more than 10 bad keys in 10 minutes gets HTTP 429. A valid key is then looked up once (`eem:v1:apikey:<id>`, to honour deletion and per-key limits) and remembered for 5 minutes.
-
-- Mint: `npx tsx scripts/create-key.ts [--per-day N] [--per-minute N]`. The key is printed once. The record holds **only** the creation date and optional limits: no owner name, email or other contact is collected (the key request lives in the issue tracker; note the key id there if you may need it later).
-- Delete: `npx tsx scripts/delete-key.ts <key-or-id>` removes the record and all of the key's live counters; running instances stop accepting it within 5 minutes. For immediate revocation everywhere (also while Redis is unavailable), add the id to `REVOKED_KEY_IDS`. Rotating `API_KEY_SECRET` revokes every key at once.
-- Both scripts need the deployment's `UPSTASH_REDIS_REST_*`, `IP_HASH_SALT` and `API_KEY_SECRET`.
-- `include_agent_details` on `lookup_business_entity` only takes effect for API-key callers (see [Privacy](#privacy-and-personal-data)).
+Fair share of the upstream budget: each client may have at most `MAX_CONCURRENT_UPSTREAM_PER_CLIENT` (4) upstream fetches in flight. The SEC token bucket refills smoothly (one token every ~167 ms at 6 rps, burst 2).
 
 ### Fitting the Upstash plan (and what happens when it runs out)
 
@@ -324,7 +316,7 @@ Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (on
 The hosted server's [Privacy Policy](https://edgar-entity-mcp.vercel.app/privacy) ([source](public/privacy.html)), [Beta terms](https://edgar-entity-mcp.vercel.app/terms) ([source](public/terms.html)) and [Contact & Abuse](https://edgar-entity-mcp.vercel.app/abuse) ([source](public/abuse.html)) pages are served from `public/`. The only contact is patryk.general@mail.grokbot.com.
 
 - Registered agents and service-of-process contacts are treated as **individuals unless the name ends with a legal-form suffix** (Inc, Corp, LLC, LLP, LP, Ltd, Company, "& Co", Bank, N.A., …) or is a known registered-agent service (CT Corporation, CSC, Cogency Global, …). "JOHN CHURCH", "JUDE LAW", "DAVID CO" and "JOHN SMITH PA" are individuals; ambiguous CO/PA/PC endings count as individual.
-- Individual agents are returned as `{ "kind": "individual", "withheld": true }`, and the entity's principal/mailing addresses (and NY location name) are withheld too (`addresses_withheld: true`), since for one-person businesses these are often a home address. `include_agent_details: true` reveals them **only for API-key callers** (and local stdio use); anonymous HTTP callers get a privacy note instead. Organizational agents are always shown.
+- Individual agents are returned as `{ "kind": "individual", "withheld": true }`, and the entity's principal/mailing addresses (and NY location name) are withheld too (`addresses_withheld: true`), since for one-person businesses these are often a home address. On the hosted endpoint they are always withheld (it issues no API keys) and a privacy note is returned instead; `include_agent_details: true` reveals them in local stdio use and, on a self-hosted HTTP server, for API-key callers. Organizational agents are always shown.
 - Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Entity ids are normalized (case, punctuation, leading zeros). A suppressed name is matched as whole words in agent names and addresses **and** in the entity name, NY location name and principal/mailing addresses; any hit removes every personal field of that record, and a hit in the entity name (also matched with spaces removed, e.g. "JANEDOE HOLDINGS LLC") replaces the name with `[withheld]`. If Redis is configured but the suppression list cannot be loaded on a cold instance, state lookups are refused (before any registry request) rather than served without it.
 - Form 4 reporting-owner names are statutory public disclosures and are returned by `get_insider_trades`.
 
@@ -359,11 +351,20 @@ The hosted deployment is live at https://edgar-entity-mcp.vercel.app/mcp. This i
 | `API_KEY_SECRET` | ≥ 32 random chars, different from `IP_HASH_SALT` |
 | `HEALTH_SECRET` | random; enables `/health?deep=1` (401 without it) |
 | `SOCRATA_APP_TOKEN` | free app token from the state portals (higher throttling limits) |
-| `KEY_REQUEST_URL` | where users request a free key (default: GitHub issue link) |
+| `KEY_REQUEST_URL` | optional, only if you issue API keys: where your users request one (default: this repo's issue tracker) |
 | `DEGRADED_SEC_RPS` | `0.2` (or `0` to stop SEC calls entirely while Redis is out) |
-| `MCP_REQUIRE_API_KEY` | optional: `1` to disable anonymous use |
+| `MCP_REQUIRE_API_KEY` | optional, self-hosters only: `1` to disable anonymous use |
 
-Also recommended: Upstash usage alerts, and `REVOKED_KEY_IDS` kept empty unless needed. Mint keys only after `API_KEY_SECRET` is final (rotating it invalidates them).
+Also recommended: Upstash usage alerts, and `REVOKED_KEY_IDS` kept empty unless needed.
+
+### Optional API keys (self-hosters)
+
+The server supports optional API keys for self-hosters; **the hosted beta does not issue keys**. If you run your own deployment and want them:
+
+- Keys look like `eem_<12-char id>_<24-hex HMAC>` and are self-verifying: the HMAC (keyed with `API_KEY_SECRET`) is checked locally, so random or forged keys are rejected without touching Redis, and a client sending more than 10 bad keys in 10 minutes gets HTTP 429. A valid key is looked up once (`eem:v1:apikey:<id>`, to honour deletion and per-key limits) and remembered for 5 minutes. Clients send `Authorization: Bearer <key>` or `x-api-key: <key>` (mcp-remote: `--header "Authorization: Bearer <key>"`).
+- Mint: `npx tsx scripts/create-key.ts [--per-day N] [--per-minute N]` (printed once; the record holds only the creation date and optional limits, no owner name or contact). Mint only after `API_KEY_SECRET` is final: rotating it invalidates every key.
+- Delete: `npx tsx scripts/delete-key.ts <key-or-id>` removes the record and the key's live counters (instances stop accepting it within 5 minutes); for immediate revocation everywhere, also while Redis is unavailable, add the id to `REVOKED_KEY_IDS`. Both scripts need the deployment's `UPSTASH_REDIS_REST_*`, `IP_HASH_SALT` and `API_KEY_SECRET`.
+- Related settings (see [Environment variables](#environment-variables)): `QUOTA_KEY_PER_MINUTE` / `QUOTA_KEY_PER_DAY` (default 120 per instance / 500), `SEC_KEYED_RESERVED_RPS` (2 of the 6 SEC requests/s reserved for key callers; anonymous traffic shares the rest), `MCP_API_KEYS`, `MCP_REQUIRE_API_KEY`, `KEY_REQUEST_URL`. Key callers may use `include_agent_details` (see [Privacy](#privacy-and-personal-data)); in degraded mode they keep SEC access at `DEGRADED_SEC_RPS`.
 
 ## Security notes
 
@@ -381,7 +382,7 @@ SEC's [fair-access policy](https://www.sec.gov/search-filings/edgar-search-assis
 
 ## Library hooks (self-hosters)
 
-- **HTTP gate**: self-verifying keys registered in Redis (`scripts/create-key.ts` / `scripts/delete-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401.
+- **HTTP gate**: self-verifying keys registered in Redis (`scripts/create-key.ts` / `scripts/delete-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401. See [Optional API keys](#optional-api-keys-self-hosters).
 - **Usage hooks for custom metering or logging**: `setUsageHooks({ beforeCall, afterCall })` (exported from the package). `beforeCall` receives `{tool, transport, apiKey, clientId, principal, args}`; throwing a `ToolError` rejects the call with that code (anything else becomes `UNAUTHORIZED`). The built-in quota hook runs first. `afterCall` receives `{ok, ms, errorCode, responseChars}`.
 
 ## Data sources & licenses
