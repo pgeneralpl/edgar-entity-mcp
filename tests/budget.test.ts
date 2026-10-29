@@ -150,9 +150,11 @@ describe("billed Upstash commands per quota check", () => {
           body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "search_company", arguments: { query: "AAPL" } } }),
         }),
       );
-    // cold, first call of the day: quota 4 + 3 EXPIRE, Redis cache GET (miss) 1, SEC token 4, cache SET 1
+    // cold, first call of the day: quota 4 + 3 EXPIRE, Redis cache GET (miss) 1, SEC token 4,
+    // cache write 6 (GET of the budget counter once per instance per day + EVALSHA with GET,
+    // SET NX EXAT (counter created), INCRBY, SET inside the script)
     const cold = await billed("HTTP search_company, cold, first call of the day (1 SEC request)", async () => (await call()).text());
-    expect(cold).toBe(13);
+    expect(cold).toBe(18);
     const warm = await billed("HTTP search_company, warm (process cache)", async () => (await call()).text());
     expect(warm).toBe(4);
     expect(cold).toBeGreaterThan(warm);

@@ -7,6 +7,8 @@ export interface CallContext {
   transport: "stdio" | "http";
   /** Upstream HTTP requests actually made during this call (cache hits make none). */
   upstream?: number;
+  /** Bytes of cache values read from Redis during this call (charged like upstream requests). */
+  redisReadBytes?: number;
   /** Quota reservation made before the call, settled (refunded) after it. */
   reservation?: unknown;
 }

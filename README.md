@@ -147,7 +147,7 @@ The node server binds `127.0.0.1` by default and only answers requests whose `Ho
 The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions with a Web-standard handler built on [`mcp-handler`](https://www.npmjs.com/package/mcp-handler)) and `vercel.json`, which runs `npm run build` and rewrites `/mcp` to `/api/mcp` and `/health` to `/api/health`. `npm run smoke:remote -- https://<project>.vercel.app/mcp` runs a live check against a deployment.
 
 1. `vercel link` then `vercel env add SEC_USER_AGENT` (plus `HEALTH_SECRET`, `IP_HASH_SALT`, optionally `SOCRATA_APP_TOKEN` / `MCP_API_KEYS`).
-2. Strongly recommended: add the **Upstash Redis** integration. The cache, the SEC/state rate budgets and the per-client quotas then become fleet-wide; without it they are per instance. In the Upstash console enable eviction (`allkeys-lru`) and usage alerts.
+2. Strongly recommended: add the **Upstash Redis** integration. The cache, the SEC/state rate budgets and the per-client quotas then become fleet-wide; without it they are per instance. Keep **eviction off** in the Upstash console and enable usage alerts: the cache bounds itself (see [Redis memory budget](#redis-memory-budget)).
 3. `vercel deploy --prod`. Point clients at `https://<project>.vercel.app/mcp`.
 
 ---
@@ -179,7 +179,8 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 | `SUPPRESSION_FILE` | – | JSON array of suppression entries (see [Privacy](#privacy-and-personal-data)) |
 | `MAX_BODY_BYTES` / `MAX_DOCUMENT_BYTES` | 65536 / 15 MB | HTTP request body cap / max filing document size |
 | `USAGE_LOG` | – | `1` logs per-call usage JSON (tool, latency, ok, response size, hashed principal) to stderr |
-| `MEMORY_CACHE_MB` / `REDIS_MAX_VALUE_BYTES` / `HTTP_TIMEOUT_MS` | 128 / 900000 / 25000 | Tuning |
+| `CACHE_WRITE_BUDGET_BYTES` | `67108864` (64 MiB) | Fleet-wide bytes of Redis cache writes per UTC day (stored value + key + 96 B overhead each); then cache writes are skipped (0 commands) until midnight. `0` = no Redis cache writes. See [Redis memory budget](#redis-memory-budget). |
+| `MEMORY_CACHE_MB` / `REDIS_MAX_VALUE_BYTES` / `HTTP_TIMEOUT_MS` | 128 / 262144 / 25000 | Tuning (`REDIS_MAX_VALUE_BYTES` is the stored, compressed size) |
 | `HOST` / `ALLOWED_HOSTS` / `ALLOWED_ORIGINS` / `TRUST_PROXY` | `127.0.0.1` / – / – / – | Self-hosted node server only |
 
 ## Hosted quotas and API keys
@@ -219,9 +220,22 @@ Free keys: open an issue at [github.com/pgeneralpl/edgar-entity-mcp](https://git
 - Both scripts need the deployment's `UPSTASH_REDIS_REST_*`, `IP_HASH_SALT` and `API_KEY_SECRET`.
 - `include_agent_details` on `lookup_business_entity` only takes effect for API-key callers (see [Privacy](#privacy-and-personal-data)).
 
-### Fitting the Upstash free plan (and what happens when it runs out)
+### Fitting the Upstash plan (and what happens when it runs out)
 
-Upstash bills every command, **including each `redis.call` inside a Lua script**. The counts below are billed commands, measured with an exact emulator of the scripts in `tests/budget.test.ts` (and the REST-visible part checked against real Upstash by `scripts/live-upstash.ts`):
+The hosted database is on Upstash's **Fixed 250 MB** plan. Its limits, as published on [upstash.com/pricing/redis](https://upstash.com/pricing/redis) and in the Upstash docs (checked 2026-10-29):
+
+| Limit | Fixed 250 MB |
+|---|---|
+| Data size | 250 MB |
+| Bandwidth | 50 GB / month |
+| Commands | not counted or billed ("unlimited"); throughput limit 10,000 commands/s ("Max commands per second" for Fixed 250MB in the plan table on the pricing page) |
+| Request / record size | 10 MB / 100 MB |
+| Eviction | off on this database (see [Redis memory budget](#redis-memory-budget)) |
+| At a limit | storage full: writes rejected; bandwidth used up: requests rejected. If the database has **auto-upgrade** enabled, Upstash upgrades it to the next tier instead (a cost, not an outage) |
+
+Not stated by Upstash, so assumed conservatively here: that bandwidth counts **both directions** (requests and responses, including HTTP overhead), and that "MB" is 10^6 bytes (250 MB ≈ 238 MiB). Whether auto-upgrade is enabled is a database setting this code can't see.
+
+Each `redis.call` inside a Lua script counts as a command for Upstash's per-command pricing (pay-as-you-go/free plans); on the Fixed plan only throughput and bandwidth matter. The counts below are those commands, measured with an exact emulator of the scripts in `tests/budget.test.ts` and `tests/cacheBudget.test.ts` (and the REST-visible part checked against real Upstash by `scripts/live-upstash.ts`):
 
 | Event | Billed commands |
 |---|---|
@@ -234,12 +248,35 @@ Upstash bills every command, **including each `redis.call` inside a Lua script**
 | Random / forged API key, or key in `REVOKED_KEY_IDS` | 0 |
 | MAC-valid key, first use (then memoised 5 min) | 1 (`GET`) |
 | SEC / state-portal request, fleet token granted (`EVALSHA` + `HMGET` + `HSET` + `PEXPIRE`) | 4 per upstream request; keyed callers whose reserved bucket is empty: 2 + 4 |
-| Shared cache: L1 (process memory) hit / Redis hit / miss + store | 0 / 1 / 2 |
+| Shared cache: L1 (process memory) hit / Redis hit / miss | 0 / 1 / 1 (bytes read are charged to the call's quota, see below) |
+| Shared cache write: one atomic `EVALSHA` (`GET` budget counter, `INCRBY`, `SET` value; + `SET NX EXAT` when it creates the counter) | 4 (5 when it creates the day's counter); + 1 `GET` of the counter on the first write of the day per instance |
+| Cache write refused by the script (counter has no room) | 2 (`EVALSHA` + `GET`), then 0 for the rest of the UTC day |
+| Suppression list refresh (`SMEMBERS`) | 1 per instance at cold start, then every 10 min while warm |
+| Cache write skipped: write budget exhausted, "redis full", or value > `REDIS_MAX_VALUE_BYTES` | 0 |
 | Any call in degraded mode | 0 |
 | **Whole call**: warm `search_company` (process cache) | **4** |
-| **Whole call**: cold call with 1 SEC request (quota 4, cache GET + SET 2, SEC token 4) | **10** (13 on the first call of the day) |
+| **Whole call**: cold call with 1 SEC request (quota 4, cache GET 1 + write 4, SEC token 4) | **13** (18 on the first call of the day) |
 
-Worst case per UTC day with the defaults: anonymous traffic is bounded by the 900-unit hard ceiling (≤ 900 calls, ≤ ~900 upstream requests): about 900 × 4 + 900 × 6 ≈ **9K** commands. Each API key at 500 units/day adds at most ≈ 4K. Upstash's free tier (about 500K commands a month, roughly 16K a day) therefore covers the anonymous tier plus a couple of active keys; size `QUOTA_ANON_GLOBAL_PER_DAY` and `QUOTA_KEY_PER_DAY` to your plan. When the plan does run out, the server degrades instead of failing:
+**Redis reads are charged.** A call's actual cost is max(upstream requests including retries, Redis cache bytes read ÷ 256 KiB rounded up, 1), capped at its estimate; the rest of the estimate is refunded. A call served from the shared cache therefore can't read many large values for one unit, and Redis read volume is bounded by the quotas (≤ 256 KiB stored per unit). Not covered: the ~240 KB ticker file read once per cold instance by calls whose estimate is too small to absorb it.
+
+**Worst case with the defaults** (every value at the 256 KiB maximum, every quota fully used every day, retries at the 4-attempt maximum, a 31-day month). Assumed fleet behaviour: ≤ 500 cold instance starts a day and ≤ 20 instances warm at once; ≤ 30 cache reads per call (the largest call, `get_insider_trades` with 20 Form 4s, makes ~27); 1 KB of request/response/HTTP overhead per command; cache reads returned base64-encoded (×4/3).
+
+| Source | Commands / day | Bandwidth / day |
+|---|---|---|
+| Anonymous quota checks: ≤ 900 allowed calls (global hard ceiling) × 7 | 6,300 | |
+| Anonymous cache `GET`s: ≤ 900 calls × 30; bytes ≤ 900 units × 256 KiB × 4/3 | 27,000 | 315 MB |
+| Anonymous upstream requests (incl. retries, each charged): ≤ 900 × (4 token + 4 cache write) | 7,200 | |
+| Cache writes, fleet-wide: ≤ 64 MiB budget (+20 % JSON escaping on uncompressed values) | (in the row above) | 81 MB |
+| Script refusals on cold instances: 7 per instance per exhausted counter (≤ 3), ≤ 500 starts | 10,500 | |
+| `SMEMBERS` suppression refresh: 20 warm × 144 + 500 cold starts | 3,400 | < 1 MB (small set) |
+| Budget counter `GET` (first write of the day per instance; the counter is created inside the write script) | 500 | |
+| Ticker file read per cold instance (~240 KB × 4/3, not always charged) | 500 | 160 MB |
+| Command overhead (1 KB × commands above) | | 56 MB |
+| **Anonymous tier + fleet, per day** | **≈ 56K** | **≈ 612 MB** |
+| **Per month (31 d)** | **≈ 1.7M** | **≈ 19.0 GB** |
+| Each API key at its full 500 units/day: quota 3 + key `GET` 1 per call, 30 `GET`s per call, 10 per upstream request (4 + 2 when the keyed reserve is empty, + 4 write) | ≈ 24K / day, ≈ 0.7M / month | ≈ 198 MB / day, ≈ **6.1 GB / month** |
+
+So with the defaults: the anonymous tier uses at most ~38 % of the 50 GB/month, each API key used to its full daily quota every day adds ~12 %, and ~5 such keys would reach the limit. Realistic traffic is far lower (most cached values are a few KB, not 256 KiB). Throughput is not a concern: even the whole worst-case day is ≈ 0.6 commands/s on average, far from 10,000/s. To keep a margin, size `QUOTA_KEY_PER_DAY` / per-key limits so that 19.0 GB + 6.1 GB × (fully active keys) × (per-key units ÷ 500) stays under ~40 GB. When a limit is reached anyway (and auto-upgrade is off), Redis rejects requests and the server degrades instead of failing:
 
 **Degraded mode.** If Redis errors, times out or reports its plan limit (`max requests limit`), the instance switches for 60 s at a time to:
 - local in-memory quotas (same daily limits, per instance);
@@ -247,7 +284,19 @@ Worst case per UTC day with the defaults: anonymous traffic is bounded by the 90
 - **API-key callers:** SEC at `DEGRADED_SEC_RPS` (0.2/s) per instance (`0` = refuse); MAC-valid keys are accepted without the Redis lookup but treated as unverified (no `include_agent_details`); keys in `REVOKED_KEY_IDS` are still refused;
 - state-registry lookups refused if the suppression list was never loaded on that instance.
 
-`/health` reports `status: "degraded"` with the reason.
+`/health` reports `status: "degraded"` with the reason (`redis unavailable`, `redis plan limit reached` (e.g. the monthly bandwidth), or `redis full` when the quota script itself hits the data-size limit).
+
+### Redis memory budget
+
+The Upstash database runs with **eviction off**. Upstash has a single eviction policy ("optimistic-volatile": random keys, TTL keys first, then any key), so with eviction on, a full database would silently drop quota counters (resetting them, i.e. failing open), API key records and the suppression set. With eviction off, a full database rejects writes (`ERR DB capacity quota exceeded`) instead, so the cache has to stay well below the plan's data size (250 MB on the Fixed 250 MB plan, taken as 250 × 10^6 bytes ≈ 238 MiB) by itself. With the defaults, worst-case stored data is ≈ 2 × 64 MiB + < 1 MB ≈ **135 MB, ~54 % of 250 MB**:
+
+- **Daily write budget** (`CACHE_WRITE_BUDGET_BYTES`, default **64 MiB**, fleet-wide): every Redis cache write counts its stored size (value + key + 96 bytes of per-key overhead) on `eem:v1:cw:<YYYYMMDD>`, and the check and the write are **one atomic Lua script** (`EVALSHA`, `EVAL` fallback): if counter + size > budget the script returns −1 and writes nothing; otherwise it creates the counter if missing (`SET 0 NX EXAT <next midnight + 1 h>`, so the counter always has its ≤ 25 h TTL), `INCRBY`s it and `SET … EX`s the value. The counter therefore **never exceeds the budget**, whatever the number of instances or concurrent writes (tested: 10 fresh instances × 50 concurrent writes against a full counter → 0 writes; from an empty counter → exactly the budget, never more; also checked against real Upstash). Local memo, to avoid useless commands: an instance's first write of the day reads the counter once (one `GET`, shared by concurrent writes), so a cold instance facing a full counter refuses without sending any value; in-flight writes are reserved locally and replies raise the memo to max(known, fleet total + this instance's pending writes). Once the memo or the script says no, that instance skips Redis cache writes **with 0 commands** until the UTC day ends. Reads continue; the process-memory cache keeps working. `0` disables Redis cache writes.
+- **TTLs end with the day**: every Redis TTL is min(normal TTL, 24 h, time until 01:00 UTC of the next day). Entries written on a UTC day are gone 1 h after it ends, so the resident cache is one day's budget, at most two (yesterday's entries plus today's writes, and only between 00:00 and 01:00 UTC): ≤ 2 × 64 MiB ≈ 134 MB. The normal TTLs are: tickers, filing documents, parsed Form 4s 24 h; XBRL frames 12 h; filing history / facts / concepts 6 h; state searches 1 h; submissions 10 min.
+- **Max value** `REDIS_MAX_VALUE_BYTES` (default 256 KiB, measured after compression). Values ≥ 8 KB are stored gzip-compressed (level 6, base64, marked by a `\u0001gz1:` prefix; decompression capped at 32 MB); larger values stay in process memory only (values over 20 × the max are not even compressed). The SEC ticker file (`company_tickers_exchange.json`, ~520–585 KB) compresses to ~240 KB and is shared once a day (1 SEC request and one write per day fleet-wide instead of one SEC request per cold instance).
+- **"redis full"**: if a cache write still gets a capacity error (`ERR DB capacity quota exceeded`, `OOM command not allowed`), that instance stops **only cache writes** for 10 minutes (`/health` → `redis_cache.writes: "redis full"`). Quota counters, the quota script, API keys and suppression are unaffected and keep their fail-closed / degraded handling. Plan request limits (`max requests limit`) and outages still trigger degraded mode as before.
+- Non-cache data is tiny: daily counters (a few bytes each, 25 h TTL), token buckets, API key records and the suppression set.
+
+`/health` shows `redis_cache: { writes: "on" | "redis full" | "disabled", write_budget_bytes_per_utc_day, max_value_bytes, … }` (no traffic volumes). Whether today's write budget is exhausted (a usage signal) is shown only with `?deep=1` and `x-health-secret: <HEALTH_SECRET>`, as `redis_write_budget: { state, until, known_used_bytes }`.
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 
@@ -268,10 +317,11 @@ Rate limiting keeps **only integer counters** in Redis, under hashed identifiers
 | `eem:v1:q:d:net:<hash>:<YYYYMMDD>` | units used today by all anonymous clients of one /24 (IPv6: /48) | 25 h |
 | `eem:v1:q:d:anon:<YYYYMMDD>` | units used today by all anonymous clients together | 25 h |
 | `eem:v1:q:d:key:<id>:<YYYYMMDD>` | units used today by one API key | 25 h |
+| `eem:v1:cw:<YYYYMMDD>` | bytes of cache writes today, whole fleet (no per-client data) | ≤ 25 h |
 
 - `<hash>` for IPs is `HMAC-SHA256(daily salt, IP or prefix)` truncated to 80 bits, where the daily salt is `HMAC-SHA256(IP_HASH_SALT, YYYYMMDD)`. Hashes from different days can't be linked, and once a day's counters expire nothing derived from that day's IPs is left. A request is hashed and counted against the same UTC day, so requests that straddle midnight are counted consistently. The per-minute counter for an IP restarts at midnight because its hash changes, so a client can get at most one extra minute's worth of quota at that moment.
 - For keys, `<id>` is the key's public id (the secret part never reaches Redis). API key records (`eem:v1:apikey:<id>`) hold only the creation date and optional per-key limits, until deleted with `scripts/delete-key.ts` (which also deletes the key's counters). The suppression set (`eem:v1:suppress`) holds erasure-request entries.
-- Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries for public SEC and state data are stored under `eem:v1:c:<sha256 of the upstream request>`, so key names don't reveal what was searched. The upstream fan-out budget (`eem:rl:*`) is a global token bucket with no per-client data.
+- Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries for public SEC and state data are stored under `eem:v1:c:<sha256 of the upstream request>`, so key names don't reveal what was searched; they expire after at most 24 h. The upstream fan-out budget (`eem:rl:*`) is a global token bucket with no per-client data.
 - **Logs**: errors (and, with `USAGE_LOG=1`, one line per call with tool name, latency, outcome, response size and the daily-rotating principal hash) go to stderr, then to Vercel runtime logs, which expire under Vercel's plan retention ([limits](https://vercel.com/docs/logs/runtime#limits)). Error text has URL query strings, IP addresses, email addresses and credential-like values masked. Tool arguments, API keys and raw IPs are never logged by this server. Vercel's own platform request logs (outside this code) record request metadata such as path and client IP under Vercel's retention.
 - Per-minute limits are kept in process memory only (70 s) and never written to Redis.
 - `/health` reports this configuration under `quotas.state`.
@@ -306,7 +356,7 @@ SEC's [fair-access policy](https://www.sec.gov/search-filings/edgar-search-assis
 - sends `SEC_USER_AGENT` on every SEC request;
 - spaces requests through a two-stage limiter: per-process spacing plus, with Redis, atomic fleet-wide token buckets (6 req/s default, 2 of them reserved for API-key callers; smooth refill, burst 2). If no token is granted within ~5 s the call fails with `RATE_LIMITED`; if Redis itself is unavailable or over its plan, anonymous callers are served from cache only and API-key callers at 0.2 req/s per instance (degraded mode);
 - retries 429/5xx with exponential backoff and respects `Retry-After`;
-- deduplicates identical in-flight requests and caches with TTLs: tickers 24h, submissions 10 min, companyfacts/concepts 6h, frames 12h, filing documents 30 days in process memory (raw documents are never written to Redis; processed text under 256 KB and parsed Form 4s are shared for 7 days), state searches 1h.
+- deduplicates identical in-flight requests and caches with TTLs: tickers 24h, submissions 10 min, companyfacts/concepts 6h, frames 12h, filing documents 24h in process memory (raw documents are never written to Redis; processed text under 256 KB and parsed Form 4s are shared for 24h), state searches 1h. No Redis cache entry lives longer than 24h.
 
 ## Monetization hooks (no billing yet)
 

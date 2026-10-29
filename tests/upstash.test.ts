@@ -1,50 +1,31 @@
-import { describe, expect, it } from "vitest";
-import type { Redis } from "@upstash/redis";
+import { describe, expect, it, vi } from "vitest";
+import { Redis } from "@upstash/redis";
+import { FAKE, fakeUpstash } from "./helpers/fakeUpstash.js";
 import { UpstashCache, redisCacheKey } from "../src/core/cache.js";
 import { RateLimiter } from "../src/core/rateLimiter.js";
 
-function fakeRedis() {
-  const store = new Map<string, { v: string; ex?: number }>();
-  const counters = new Map<string, number>();
-  const r = {
-    store,
-    async get(k: string) {
-      return store.get(k)?.v ?? null;
-    },
-    async set(k: string, v: string, opts?: { ex?: number }) {
-      store.set(k, { v, ex: opts?.ex });
-      return "OK";
-    },
-    async incr(k: string) {
-      const n = (counters.get(k) ?? 0) + 1;
-      counters.set(k, n);
-      return n;
-    },
-    async expire() {
-      return 1;
-    },
-  };
-  return r;
-}
-
 describe("Upstash adapters (fake client)", () => {
   it("stores with TTL and skips oversized values", async () => {
-    const r = fakeRedis();
-    const c = new UpstashCache(r as unknown as Redis, 10);
+    const f = fakeUpstash();
+    vi.stubGlobal("fetch", f.fetchStub);
+    const c = new UpstashCache(new Redis({ url: FAKE, token: "t", automaticDeserialization: false }), 10);
     await c.set("a", "small", 60);
     await c.set("b", "this value is too large", 60);
     expect(await c.get("a")).toBe("small");
     expect(await c.get("b")).toBeUndefined();
-    expect(r.store.get(redisCacheKey("a"))!.ex).toBe(60);
+    expect(f.kv.get(redisCacheKey("a"))!.ttl).toBe(60);
+    vi.unstubAllGlobals();
   });
   it("hashes cache keys so Redis never sees upstream URLs / tool arguments", async () => {
-    const r = fakeRedis();
-    const c = new UpstashCache(r as unknown as Redis, 1000);
+    const f = fakeUpstash();
+    vi.stubGlobal("fetch", f.fetchStub);
+    const c = new UpstashCache(new Redis({ url: FAKE, token: "t", automaticDeserialization: false }), 1000);
     await c.set("eem:v1:https://data.colorado.gov/resource/x.json?$where=entityname like '%JANE DOE%'", "[]", 60);
-    const keys = [...r.store.keys()];
+    const keys = [...f.kv.keys()].filter((k) => !k.includes(":cw:"));
     expect(keys).toHaveLength(1);
     expect(keys[0]).toMatch(/^eem:v1:c:[0-9a-f]{40}$/);
     expect(keys[0]).not.toMatch(/JANE|colorado/i);
+    vi.unstubAllGlobals();
   });
   it("never throws when Redis fails", async () => {
     const broken = { get: async () => { throw new Error("down"); }, set: async () => { throw new Error("down"); } };

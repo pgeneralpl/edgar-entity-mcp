@@ -71,9 +71,10 @@ describe("Redis rate-limit state contains no raw IPs, user agents, paths or tool
     expect(keys.some((k) => /^eem:v1:q:d:anon:\d{8}$/.test(k))).toBe(true); // global anonymous daily
     expect(keys.some((k) => k.includes(":q:m:"))).toBe(false); // per-minute limits are in memory only
     // Every key is a hashed id, a cache hash, or a counter; every quota value is an integer.
-    for (const k of keys) expect(k).toMatch(/^eem:v1:(q:[dm]:((ip|net|key):[0-9a-f]+|anon):\d+|c:[0-9a-f]{40})$/);
+    for (const k of keys) expect(k).toMatch(/^eem:v1:(q:[dm]:((ip|net|key):[0-9a-f]+|anon):\d+|c:[0-9a-f]{40}|cw:\d{8})$/);
     for (const [k, { v, ttl }] of f.kv) {
-      if (k.includes(":q:")) expect(v).toMatch(/^-?\d+$/);
+      if (k.includes(":q:") || k.includes(":cw:")) expect(v).toMatch(/^-?\d+$/);
+      if (k.includes(":cw:")) expect(ttl).toBeLessThanOrEqual(25 * 3600); // cache-write byte budget
       if (k.includes(":q:d:")) expect(ttl).toBe(DAY_COUNTER_TTL_SECONDS);
       if (k.includes(":q:m:")) expect(ttl).toBe(MINUTE_COUNTER_TTL_SECONDS);
     }

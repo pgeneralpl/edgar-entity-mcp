@@ -2,7 +2,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { loadConfig } from "../config.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
 import { SUPPORTED_STATES } from "../states/registry.js";
-import { getRedis } from "../core/cache.js";
+import { REDIS_COMPRESS_MIN_BYTES, cacheWriteStatus, getRedis } from "../core/cache.js";
 import { logError } from "../core/errors.js";
 import { degradedStatus } from "../core/degraded.js";
 import { isPatchedNode } from "../core/nodeVersion.js";
@@ -20,6 +20,7 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
     version: VERSION,
     mcp_endpoint: "/mcp",
     cache: redis ? "upstash+memory" : "memory",
+    ...(redis ? { redis_cache: redisCacheHealth(c.cacheWriteBudgetBytes, c.redisMaxValueBytes) } : {}),
     sec_rate_limit: {
       rps: c.secMaxRps,
       reserved_for_api_keys_rps: redis ? Math.min(c.secKeyedReservedRps, Math.max(0, c.secMaxRps - 1)) : 0,
@@ -43,6 +44,33 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
   };
 }
 
+/**
+ * Cache-write guard state (eviction is off, so the cache bounds itself). No traffic volumes exposed:
+ * whether today's write budget is spent (a usage signal) is shown only with `?deep=1` + HEALTH_SECRET.
+ */
+function redisCacheHealth(budgetBytes: number, maxValueBytes: number) {
+  const w = cacheWriteStatus();
+  const full = budgetBytes > 0 && w.writes === "redis full";
+  return {
+    writes: budgetBytes <= 0 ? "disabled" : full ? "redis full" : "on", // "on" | "redis full" | "disabled"
+    ...(full && w.until ? { until: w.until } : {}),
+    write_budget_bytes_per_utc_day: budgetBytes,
+    max_value_bytes: maxValueBytes,
+    compressed_from_bytes: REDIS_COMPRESS_MIN_BYTES,
+    max_ttl: "24 h, and never past 01:00 UTC of the next day",
+  };
+}
+
+/** Private (HEALTH_SECRET) view of today's write budget. */
+function writeBudgetDetail() {
+  const w = cacheWriteStatus();
+  return {
+    state: w.writes === "budget exhausted" ? "exhausted" : w.writes === "ok" ? "ok" : w.writes,
+    ...(w.until && w.writes === "budget exhausted" ? { until: w.until } : {}),
+    known_used_bytes: w.known_used_bytes,
+  };
+}
+
 function secretMatches(given: string | null, secret: string | undefined): boolean {
   if (!secret || !given) return false;
   const a = createHash("sha256").update(given).digest();
@@ -51,7 +79,7 @@ function secretMatches(given: string | null, secret: string | undefined): boolea
 }
 
 /**
- * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds a Redis PING.
+ * `?deep=1` with header `x-health-secret: <HEALTH_SECRET>` adds a Redis PING and today's cache-write budget state.
  * Without a matching secret the deep check is silently skipped. Errors are never echoed.
  */
 export async function healthResponse(req?: Request, env: NodeJS.ProcessEnv = process.env): Promise<Response> {
@@ -61,6 +89,7 @@ export async function healthResponse(req?: Request, env: NodeJS.ProcessEnv = pro
       body.deep = "skipped (requires x-health-secret)";
     } else {
       const redis = getRedis();
+      if (redis) body.redis_write_budget = writeBudgetDetail();
       if (!redis) body.redis = "not configured";
       else {
         const t0 = Date.now();

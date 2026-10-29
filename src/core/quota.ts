@@ -436,16 +436,21 @@ export async function chargeQuota(p: Principal, tool: string, args: unknown, s: 
   if (ctx) ctx.reservation = { p, cost, limits, store: used, at } satisfies Reservation;
 }
 
+/** Redis cache bytes read per quota unit (= the max stored value size), so reads are bounded by quota. */
+export const REDIS_READ_BYTES_PER_UNIT = 256 * 1024;
+
 /**
- * Settle the reservation of the current call: actual cost = upstream requests made, minimum 1
- * (a fully cached call still uses the server), capped at the estimate. The rest is refunded.
+ * Settle the reservation of the current call: actual cost = max(upstream requests made, Redis cache
+ * bytes read / REDIS_READ_BYTES_PER_UNIT rounded up, 1), capped at the estimate. The rest is refunded.
+ * Counting Redis reads keeps a call served from the shared cache from reading many large values for
+ * one unit (the Redis plan's monthly bandwidth is the binding limit).
  */
 export function settleQuota(): void {
   const ctx = currentContext();
   const r = ctx?.reservation as Reservation | undefined;
   if (!ctx || !r) return;
   ctx.reservation = undefined;
-  const actual = Math.min(r.cost, Math.max(1, ctx.upstream ?? 0));
+  const actual = Math.min(r.cost, Math.max(1, ctx.upstream ?? 0, Math.ceil((ctx.redisReadBytes ?? 0) / REDIS_READ_BYTES_PER_UNIT)));
   const back = r.cost - actual;
   if (back <= 0) return;
   r.store.refund?.(r.p, back, r.limits, r.at);

@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { CACHE_WRITE_SCRIPT, CACHE_WRITE_SCRIPT_SHA } from "../../src/core/cache.js";
 
 export const FAKE = "https://fake-upstash.test";
 
@@ -59,6 +60,25 @@ export function fakeUpstash() {
       });
     return [bad, ...vals];
   };
+  /** JS port of CACHE_WRITE_SCRIPT in src/core/cache.ts (same semantics and same inner commands). */
+  const cacheWriteScript = (keys: string[], args: string[]): unknown => {
+    const [ckey, vkey] = keys as [string, string];
+    const [b, budget, exat, ex] = args.slice(0, 4).map(Number) as [number, number, number, number];
+    inner("GET");
+    const raw = kv.get(ckey);
+    const cur = raw ? Number(raw.v) || 0 : 0;
+    if (cur + b > budget) return [-1, cur];
+    if (!raw) {
+      inner("SET");
+      kv.set(ckey, { v: "0", ttl: exat - Math.floor(Date.now() / 1000) });
+    }
+    inner("INCRBY");
+    const t = cur + b;
+    kv.set(ckey, { v: String(t), ttl: kv.get(ckey)!.ttl });
+    inner("SET");
+    kv.set(vkey, { v: args[4]!, ttl: ex });
+    return [1, t];
+  };
   const exec = (cmd: unknown[]): unknown => {
     commands.push(cmd);
     billed.n++;
@@ -67,9 +87,24 @@ export function fakeUpstash() {
       case "get":
         return kv.get(a[0]!)?.v ?? null;
       case "set": {
-        const exIdx = a.findIndex((x) => x.toLowerCase() === "ex");
-        kv.set(a[0]!, { v: a[1]!, ttl: exIdx > 0 ? Number(a[exIdx + 1]) : undefined });
+        const opt = (name: string) => a.findIndex((x, i) => i >= 2 && x.toLowerCase() === name);
+        if (opt("nx") > 0 && kv.has(a[0]!)) return null;
+        const exIdx = opt("ex");
+        const exatIdx = opt("exat");
+        const ttl = exIdx > 0 ? Number(a[exIdx + 1]) : exatIdx > 0 ? Number(a[exatIdx + 1]) - Math.floor(Date.now() / 1000) : undefined;
+        kv.set(a[0]!, { v: a[1]!, ttl });
         return "OK";
+      }
+      case "incrby": {
+        const v = getNum(a[0]!) + Number(a[1]);
+        kv.set(a[0]!, { v: String(v), ttl: kv.get(a[0]!)?.ttl });
+        return v;
+      }
+      case "expireat": {
+        const e = kv.get(a[0]!);
+        if (!e) return 0;
+        e.ttl = Number(a[1]) - Math.floor(Date.now() / 1000);
+        return 1;
       }
       case "smembers":
         return [];
@@ -88,6 +123,7 @@ export function fakeUpstash() {
         const nkeys = Number(a[1]);
         const keys = a.slice(2, 2 + nkeys);
         const args = a.slice(2 + nkeys);
+        if (a[0] === CACHE_WRITE_SCRIPT_SHA || a[0] === CACHE_WRITE_SCRIPT) return cacheWriteScript(keys, args);
         if (args.length === 5) {
           // @upstash/ratelimit tokenBucket: HMGET + HSET + PEXPIRE when a token is granted.
           inner("HMGET");
@@ -103,7 +139,26 @@ export function fakeUpstash() {
     }
   };
   /** Set to an Upstash error string (e.g. the plan-limit message) to make every command fail. */
-  const state: { failWith?: string } = {};
+  /** `state.noscript`: EVALSHA fails with NOSCRIPT until the next EVAL loads the script (like a fresh Redis). */
+  const state: { failWith?: string; full?: boolean; noscript?: boolean } = {};
+  /** `state.full`: emulate a database at its data-size limit with eviction off (writes rejected, reads served). */
+  const FULL_ERR = "ERR DB capacity quota exceeded";
+  const WRITES = new Set(["set", "incrby", "incr", "expire", "expireat", "evalsha", "eval", "hset", "sadd"]);
+  const run = (c: unknown[]): { result?: unknown; error?: string } => {
+    const op = String(c[0]).toLowerCase();
+    if (state.noscript && op === "evalsha") {
+      commands.push(c);
+      billed.n++;
+      return { error: "NOSCRIPT No matching script. Please use EVAL." };
+    }
+    if (op === "eval") state.noscript = false;
+    if (state.full && WRITES.has(String(c[0]).toLowerCase())) {
+      commands.push(c);
+      billed.n++;
+      return { error: FULL_ERR };
+    }
+    return { result: exec(c) };
+  };
   const fetchStub = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (!url.startsWith(FAKE)) throw new Error(`unexpected network call: ${url}`);
@@ -115,8 +170,13 @@ export function fakeUpstash() {
       const err = { error: state.failWith };
       return new Response(JSON.stringify(isBatch ? cmds.map(() => err) : err), { status: isBatch ? 200 : 400, headers: { "content-type": "application/json" } });
     }
-    const out = isBatch ? (body as unknown[][]).map((c) => ({ result: exec(c) })) : { result: exec(body) };
-    return new Response(JSON.stringify(out), { status: 200, headers: { "content-type": "application/json" } });
+    // Like the real REST API: with `Upstash-Encoding: base64` string results come back base64-encoded.
+    const b64 = new Headers(init?.headers).get("upstash-encoding") === "base64";
+    const enc = (v: unknown): unknown => (typeof v === "string" && v !== "OK" ? Buffer.from(v, "utf8").toString("base64") : Array.isArray(v) ? v.map(enc) : v);
+    const wrap = (r: { result?: unknown; error?: string }) => (b64 && "result" in r ? { result: enc(r.result) } : r);
+    const out = isBatch ? (body as unknown[][]).map((c) => wrap(run(c))) : wrap(run(body));
+    const status = !isBatch && "error" in out ? 400 : 200;
+    return new Response(JSON.stringify(out), { status, headers: { "content-type": "application/json" } });
   });
   return { commands, kv, fetchStub, state, billed, internal };
 }
