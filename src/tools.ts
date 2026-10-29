@@ -10,7 +10,7 @@ import { extractSection, fetchDocumentText, listSections, normalizeSectionId, SE
 import { getFinancials, METRIC_KEYS } from "./sec/financials.js";
 import { getConcept, getFrame } from "./sec/xbrl.js";
 import { getInsiderTrades } from "./sec/insider.js";
-import { ANON_MAX_OFFSET, ENTITY_ID_RE, MAX_OFFSET, assertContainsName, searchState, statesBeyondWindow, type MatchMode } from "./states/socrata.js";
+import { ANON_MAX_OFFSET, ENTITY_ID_RE, MAX_OFFSET, NAME_MAX_CHARS, assertContainsName, assertStartsWithName, prepareEntityName, searchState, statesBeyondWindow, type MatchMode } from "./states/socrata.js";
 import { COLORADO_DISCLAIMER, STATE_SOURCES, SUPPORTED_STATES, UNSUPPORTED_NOTES } from "./states/registry.js";
 import { normalizeAccession } from "./core/util.js";
 
@@ -205,11 +205,14 @@ export const getXbrlConcept = def({
   },
 });
 
+const COMPARE_UNRESOLVED_HINT =
+  "compare_companies matches tickers, CIKs and exact or prefix company names only (no typo correction). Use search_company to find the ticker or CIK, then call again with it.";
+
 export const compareCompanies = def({
   name: "compare_companies",
   title: "Cross-company comparison (XBRL frames)",
   description:
-    "Compare one XBRL concept across ALL reporting companies for a calendar period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, required for balance-sheet items like Assets). Pass companies to filter to specific tickers/CIKs; otherwise returns the top `limit` by value.",
+    "Compare one XBRL concept across ALL reporting companies for a calendar period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, required for balance-sheet items like Assets). Pass companies to filter to specific tickers/CIKs (exact or prefix names also work, without typo correction; unresolved items are listed in `unresolved`); otherwise returns the top `limit` by value.",
   inputSchema: z.object({
     tag: z.string().min(1).max(200).describe("e.g. 'Revenues', 'NetIncomeLoss', 'Assets'"),
     period: z.string().min(4).max(12).describe("CY2024, CY2024Q3, or CY2024Q4I"),
@@ -221,13 +224,28 @@ export const compareCompanies = def({
   }),
   async run(a) {
     let ciks: string[] | undefined;
-    // No did-you-mean scan here: up to 25 names per call would each run a fuzzy pass over the ticker list.
-    if (a.companies?.length) ciks = await Promise.all(a.companies.map(async (x) => (await resolveCompany(x, { suggest: false })).cik));
+    let unresolved: { company: string; code: string; message: string; candidates?: unknown }[] | undefined;
+    if (a.companies?.length) {
+      // Up to 25 items per call: exact/prefix matching only. Typo ranking and did-you-mean would each run
+      // a full pass over the ticker list per item; unresolved items are reported instead.
+      const settled = await Promise.allSettled(a.companies.map((x) => resolveCompany(x, { fuzzy: false })));
+      ciks = [];
+      unresolved = [];
+      for (const [i, r] of settled.entries()) {
+        if (r.status === "fulfilled") ciks.push(r.value.cik);
+        else if (r.reason instanceof ToolError && (r.reason.code === "NOT_FOUND" || r.reason.code === "AMBIGUOUS" || r.reason.code === "INVALID_INPUT"))
+          unresolved.push({ company: a.companies[i]!, code: r.reason.code, message: r.reason.message, candidates: r.reason.details?.candidates });
+        else throw r.reason;
+      }
+      if (!ciks.length)
+        throw new ToolError("NOT_FOUND", "None of the companies could be resolved.", COMPARE_UNRESOLVED_HINT, { unresolved });
+    }
     let taxonomy: string = a.taxonomy;
     let tag = a.tag.trim();
     if (tag.includes(":")) [taxonomy, tag] = tag.split(":", 2) as [string, string];
     const unit = a.unit.replace("/", "-per-");
-    return compact(await getFrame({ taxonomy, tag, unit, period: a.period, ciks, limit: a.limit, order: a.order }));
+    const frame = await getFrame({ taxonomy, tag, unit, period: a.period, ciks, limit: a.limit, order: a.order });
+    return compact({ ...frame, ...(unresolved?.length ? { unresolved, unresolved_hint: COMPARE_UNRESOLVED_HINT } : {}) });
   },
 });
 
@@ -270,7 +288,7 @@ export const lookupBusinessEntity = def({
   title: "State business-entity registry lookup",
   description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Name matching ignores case, punctuation, '&' vs 'and' and legal-suffix spelling (Inc/Inc./Incorporated, Co/Company, LLC/L.L.C.); results are ranked exact > prefix > other matches, active entities first within each tier. Paginate per state with limit/offset (has_more, next_offset; total when include_total=true or on the last page). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (individual agents withheld unless include_agent_details=true), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names; for SEC-listed companies use search_company. Call list_supported_states for coverage and licenses.`,
   inputSchema: z.object({
-    name: z.string().min(2).max(200).optional().describe("Entity name or fragment, e.g. 'Tiffany & Co.' (also matches 'TIFFANY AND COMPANY')"),
+    name: z.string().min(2).max(NAME_MAX_CHARS).optional().describe("Entity name or fragment, e.g. 'Tiffany & Co.' (also matches 'TIFFANY AND COMPANY')"),
     entity_id: z.string().regex(ENTITY_ID_RE, "Letters, digits and '-' only (max 40)").optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
     states: z.array(z.enum(SUPPORTED_STATES as [string, ...string[]])).max(5).optional().describe("Default: all supported states"),
     match: z.enum(["contains", "starts_with", "exact"]).default("contains"),
@@ -302,9 +320,11 @@ export const lookupBusinessEntity = def({
     if (!a.name && !a.entity_id) reject("Provide name and/or entity_id.");
     if (a.offset > ANON_MAX_OFFSET && callerIsAnonymous())
       reject(`offset is limited to ${ANON_MAX_OFFSET} for anonymous use.`, "Refine the name (match='starts_with' or 'exact', a single state) or use an API key.");
-    if (a.name && a.match === "contains") {
+    if (a.name) {
       try {
-        assertContainsName(a.name);
+        const name = prepareEntityName(a.name); // NFKC + length cap before any $where is built
+        if (a.match === "contains") assertContainsName(name);
+        if (a.match === "starts_with") assertStartsWithName(name);
       } catch (e) {
         if (ctx) ctx.free = true;
         throw e;

@@ -14,10 +14,16 @@ export const MAX_OFFSET = 500;
 export const MULTIROW_WINDOW = 300;
 /** Max spelling variants used for exact matching / ranking (bounds URL length). */
 export const MAX_VARIANTS = 32;
+/** Max total characters of those variants (keeps $where + $order well below URL limits for long names). */
+export const MAX_VARIANT_CHARS = 1200;
 /** Max tokens used in a LIKE pattern. */
 const MAX_PATTERN_TOKENS = 8;
 /** Largest offset anonymous (keyless) HTTP callers may request: limits bulk enumeration of registries. */
 export const ANON_MAX_OFFSET = 100;
+/** In starts_with mode at least one pattern token must be this long ("A%" would match a large share of a registry). */
+export const MIN_STARTS_WITH_TOKEN = 2;
+/** Longest entity name (after NFKC) used to build queries: bounds the $where/$order URL length (no 414 that is still charged). */
+export const NAME_MAX_CHARS = 100;
 /** In contains mode at least one pattern token must be this long ("%A%B%" would match almost everything). */
 export const MIN_CONTAINS_TOKEN = 3;
 /** State entity ids: letters, digits and dashes only. */
@@ -50,9 +56,21 @@ export function soqlString(v: string): string {
 /** Characters kept in the as-typed exact-match variant (everything else becomes a space). */
 const TYPED_UNSAFE = /[^A-Z0-9 &.,'-]+/g;
 
-/** Upper-case, collapse whitespace and drop LIKE wildcards. */
+/**
+ * NFKC-normalise an entity name (fullwidth "ＡＣＭＥ" -> "ACME", ligatures, compatibility forms) and
+ * enforce NAME_MAX_CHARS. Every name that reaches a query or ranking goes through this first.
+ */
+export function prepareEntityName(name: string): string {
+  const n = name.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (n.length > NAME_MAX_CHARS)
+    throw new ToolError("INVALID_INPUT", `name is limited to ${NAME_MAX_CHARS} characters.`, "Use the distinctive part of the name; matching ignores legal suffixes and punctuation.");
+  return n;
+}
+
+/** NFKC, upper-case, collapse whitespace and drop LIKE wildcards. */
 export function cleanNameQuery(q: string): string {
   return q
+    .normalize("NFKC")
     .replace(/[%_]/g, " ")
     .replace(/\s+/g, " ")
     .trim()
@@ -96,12 +114,15 @@ function expand(tokens: string[], cap: number): string[] {
  * Upper-case spellings a registry may store for this name: the query as typed, then
  * &/AND and INC/INC./INCORPORATED-style variants, with and without a comma before the final
  * legal suffix and with/without a leading "THE". With `addSuffixes` (ranking only) and a query
- * without a legal suffix, common suffixes are appended too. Bounded to MAX_VARIANTS.
+ * without a legal suffix, common suffixes are appended too. Bounded to MAX_VARIANTS and MAX_VARIANT_CHARS.
  */
 export function nameVariants(name: string, opts: { addSuffixes?: boolean } = {}): string[] {
   const out = new Set<string>();
+  let chars = 0;
   const add = (v: string) => {
-    if (out.size < MAX_VARIANTS) out.add(v);
+    if (out.size >= MAX_VARIANTS || out.has(v) || chars + v.length > MAX_VARIANT_CHARS) return;
+    out.add(v);
+    chars += v.length;
   };
   // The as-typed spelling ("AT&T INC.") reduced to an allowlisted charset: the raw input never reaches $where/$order.
   const typed = cleanNameQuery(name).replace(TYPED_UNSAFE, " ").replace(/\s+/g, " ").trim();
@@ -141,6 +162,7 @@ function nameClause(src: StateSource, name: string, mode: MatchMode): string {
   const tokens = patternTokens(name);
   if (!tokens.length) throw new ToolError("INVALID_INPUT", "name must contain letters or digits.");
   if (mode === "contains") assertContainsName(name);
+  if (mode === "starts_with") assertStartsWithName(name);
   // Tokens in order with anything between them: "Tiffany and Company" -> TIFFANY% (matches "TIFFANY & CO.").
   const body = tokens.join("%");
   return `${f} like ${soqlString(mode === "starts_with" ? `${body}%` : `%${body}%`)}`;
@@ -158,6 +180,18 @@ export function assertContainsName(name: string): void {
     );
 }
 
+/** Throws INVALID_INPUT unless a starts_with name has at least one token of MIN_STARTS_WITH_TOKEN+ chars. */
+export function assertStartsWithName(name: string): void {
+  const tokens = patternTokens(name);
+  if (!tokens.length) throw new ToolError("INVALID_INPUT", "name must contain letters or digits.");
+  if (!tokens.some((t) => t.length >= MIN_STARTS_WITH_TOKEN))
+    throw new ToolError(
+      "INVALID_INPUT",
+      `match='starts_with' needs at least one name word of ${MIN_STARTS_WITH_TOKEN}+ letters or digits (legal suffixes like Inc/LLC do not count).`,
+      "Use a longer name prefix, or match='exact' for single-letter names.",
+    );
+}
+
 export function assertEntityId(id: string): string {
   const v = id.trim();
   if (!ENTITY_ID_RE.test(v)) throw new ToolError("INVALID_INPUT", "entity_id may contain only letters, digits and '-' (max 40).");
@@ -168,7 +202,7 @@ export function buildWhere(src: StateSource, opts: { name?: string; entityId?: s
   const clauses: string[] = [];
   if (opts.activeOnly && src.activeWhere) clauses.push(src.activeWhere);
   if (opts.entityId) clauses.push(`${src.idField} = ${soqlString(assertEntityId(opts.entityId))}`);
-  if (opts.name) clauses.push(nameClause(src, opts.name, opts.mode));
+  if (opts.name) clauses.push(nameClause(src, prepareEntityName(opts.name), opts.mode));
   return clauses.join(" AND ");
 }
 
@@ -180,6 +214,7 @@ export function buildOrder(src: StateSource, name?: string): string {
   const f = `upper(${src.nameField})`;
   const parts: string[] = [];
   if (name) {
+    name = prepareEntityName(name);
     const tokens = patternTokens(name);
     const prefix = tokens.length ? `, ${f} like ${soqlString(`${tokens.join("%")}%`)}, 1` : "";
     parts.push(`case(${f} in (${nameVariants(name, { addSuffixes: true }).map(soqlString).join(", ")}), 0${prefix}, true, 2)`);
@@ -269,6 +304,7 @@ export async function searchState(
 ): Promise<StatePage> {
   const src = STATE_SOURCES[code];
   if (!src) throw new ToolError("UNSUPPORTED", `State ${code} is not supported.`);
+  if (opts.name) opts = { ...opts, name: prepareEntityName(opts.name) }; // also used for client-side ranking
   const offset = opts.offset ?? 0;
   if (!Number.isInteger(offset) || offset < 0 || offset > MAX_OFFSET) throw new ToolError("INVALID_INPUT", `offset must be 0..${MAX_OFFSET}.`);
   // Load the suppression list BEFORE any upstream request: refuse (cold start, Redis down) early.

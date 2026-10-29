@@ -87,10 +87,10 @@ interface PreparedQuery {
   name: Pick<Prepared, "core" | "tokens" | "compact"> & { fuzzy: boolean };
 }
 
-function prepareQuery(query: string): PreparedQuery {
+function prepareQuery(query: string, allowFuzzy = true): PreparedQuery {
   const qU = query.trim().toUpperCase();
   const name = prepareName(query);
-  const fuzzy = qU.length <= FUZZY_MAX_CHARS && name.tokens.length <= FUZZY_MAX_TOKENS;
+  const fuzzy = allowFuzzy && qU.length <= FUZZY_MAX_CHARS && name.tokens.length <= FUZZY_MAX_TOKENS;
   return { qU, qT: qU.replace(/[-.\s]/g, ""), name: { ...name, fuzzy } };
 }
 
@@ -146,9 +146,12 @@ export interface CompanyMatch {
 const preparedFormer = FORMER_NAMES.map((f) => ({ ...f, p: prepareName(f.name) }));
 
 
-/** Search the SEC ticker list. Rows sharing a CIK (multiple share classes) are merged. */
-export function rankCompanies(rows: TickerRow[], query: string, limit: number, threshold = MATCH_THRESHOLD): CompanyMatch[] {
-  const q = prepareQuery(query);
+/**
+ * Search the SEC ticker list. Rows sharing a CIK (multiple share classes) are merged.
+ * `fuzzy: false` keeps only ticker, exact-name and prefix/substring matches (no typo ranking).
+ */
+export function rankCompanies(rows: TickerRow[], query: string, limit: number, threshold = MATCH_THRESHOLD, opts: { fuzzy?: boolean } = {}): CompanyMatch[] {
+  const q = prepareQuery(query, opts.fuzzy ?? true);
   const pr = preparedRows(rows);
   const byCik = new Map<number, CompanyMatch>();
   const add = (r: TickerRow, s: number, former?: string) => {
@@ -238,16 +241,19 @@ export interface ResolvedCompany {
 /**
  * Resolve a user-supplied company reference (CIK, ticker, or name) to a CIK.
  * Digits are treated as CIK; otherwise exact ticker, then confident name match.
+ * `fuzzy: false` skips typo-tolerant ranking and did-you-mean (bulk callers: compare_companies).
  */
-export async function resolveCompany(input: string, opts: { suggest?: boolean } = {}): Promise<ResolvedCompany> {
-  const suggest = opts.suggest ?? true;
+export async function resolveCompany(input: string, opts: { suggest?: boolean; fuzzy?: boolean } = {}): Promise<ResolvedCompany> {
+  const fuzzy = opts.fuzzy ?? true;
+  const suggest = fuzzy && (opts.suggest ?? true);
   const q = input.trim();
   if (!q) throw new ToolError("INVALID_INPUT", "company is required (ticker, CIK, or company name)");
   if (/^(CIK)?\d{1,10}$/i.test(q)) return { cik: padCik(q) };
   // Separate key without suggestions so concurrent deduped calls never share the other variant's error.
-  return derived(`resolve:${suggest ? "" : "nosuggest:"}${q.toUpperCase()}`, TTL.tickers, async () => {
+  const variant = fuzzy ? (suggest ? "" : "nosuggest:") : "exact:";
+  return derived(`resolve:${variant}${q.toUpperCase()}`, TTL.tickers, async () => {
     const rows = await loadTickers();
-    const matches = rankCompanies(rows, q, 5);
+    const matches = rankCompanies(rows, q, 5, MATCH_THRESHOLD, { fuzzy });
     const top = matches[0];
     if (!top)
       throw new ToolError("NOT_FOUND", `No SEC registrant matches "${q}".`, NOT_LISTED_HINT, {
