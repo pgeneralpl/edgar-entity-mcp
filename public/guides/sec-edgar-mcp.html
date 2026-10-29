@@ -152,10 +152,10 @@ nav,footer{font-size:.875em}
         },
         {
           "@type": "Question",
-          "name": "Is this investment advice?",
+          "name": "Is this investment, legal or financial advice?",
           "acceptedAnswer": {
             "@type": "Answer",
-            "text": "No. It returns public filings and registry data with source links; verify figures in the original filing."
+            "text": "No. It is not investment, legal or financial advice. It returns public filings and registry data with source links; verify figures in the original filing."
           }
         }
       ]
@@ -304,12 +304,12 @@ No. It is an independent open-source project that reads public data. It is not a
 No. Only NY, CO, OR, CT and PA are covered right now, and NY/OR/PA include active entities only.</p>
 <p><strong>Can I use it for background checks, credit, employment or tenant screening?</strong>
 No. It is not a consumer reporting agency, and it must not be used for any FCRA purpose.</p>
-<p><strong>Is this investment advice?</strong>
-No. It returns public filings and registry data with links to the source. Always verify the figures in the original filing.</p>
+<p><strong>Is this investment, legal or financial advice?</strong>
+No. It is not investment, legal or financial advice. It returns public filings and registry data with links to the source. Always verify the figures in the original filing.</p>
 <p><strong>How fresh is the data?</strong>
 EDGAR data is fetched from the SEC with short caches (about 10 minutes for filing lists, a few hours for XBRL facts). State datasets update on each state's own schedule, which <code>list_supported_states</code> reports.</p>
 <p><strong>Can I self-host it?</strong>
-Yes. <code>npm run build &amp;&amp; npm run start:http</code> runs the HTTP server locally, and the repo includes a Vercel deployment config. Self-hosted HTTP mode enforces per-IP quotas like the hosted endpoint (defaults adjustable with the <code>QUOTA_*</code> environment variables); only local stdio use has no quotas. Set <code>SEC_USER_AGENT</code> to your own name and email.</p>
+Yes. <code>npm run build &amp;&amp; npm run start:http</code> runs the HTTP server locally, and the repo includes a Vercel deployment config. Self-hosted HTTP mode (from 0.2.0) enforces per-IP quotas like the hosted endpoint (defaults adjustable with the <code>QUOTA_*</code> environment variables); only local stdio use has no quotas. Set <code>SEC_USER_AGENT</code> to your own name and email.</p>
 <h2>Links</h2>
 <ul>
 <li>Source (MIT): <a href="https://github.com/pgeneralpl/edgar-entity-mcp" rel="noopener">https://github.com/pgeneralpl/edgar-entity-mcp</a></li>
