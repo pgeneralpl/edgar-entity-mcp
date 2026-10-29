@@ -29,7 +29,7 @@
 - 60 units per day per IP and 30 per minute; a call answered from cache costs 1 unit.
 - Shared daily budgets per network and for all anonymous use; when the shared budget is spent, only a small trickle per IP is allowed.
 - Not intended for bulk downloads; run it locally for heavier personal use.
-- Higher limits on request via a GitHub issue: https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml
+- Higher limits may be requested by a person via the GitHub issue form (manual review, no guarantee): https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml
 
 ## Notes
 - Not affiliated with the SEC or any state. Not investment, legal or credit advice.

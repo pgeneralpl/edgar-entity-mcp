@@ -28,7 +28,7 @@ Internals for operators and self-hosters of edgar-entity-mcp: environment variab
 | `DEGRADED_SEC_RPS` | `0.2` (max 2) | Per-instance SEC rate for API-key callers while Redis is unavailable or over its plan limit; `0` = refuse SEC calls. Anonymous callers are cache-only in that state. |
 | `MCP_API_KEYS` | – | Comma-separated static keys (accepted alongside hashed keys stored in Redis) |
 | `MCP_REQUIRE_API_KEY` | – | `1` rejects anonymous HTTP calls with 401 (0.1.x required a key whenever `MCP_API_KEYS` was set) |
-| `KEY_REQUEST_URL` | higher-limits issue form | Link in the `RATE_LIMITED` / 401 hints ("Need higher limits? Open an issue: …"); defaults to `HIGHER_LIMITS_ISSUE_URL` in `src/config.ts` |
+| `KEY_REQUEST_URL` | higher-limits issue form | Link in the quota `RATE_LIMITED` hint, the invalid-key 401 hint and the key-required 401 hint; defaults to `HIGHER_LIMITS_ISSUE_URL` in `src/config.ts`. Only absolute `https://` URLs are accepted; anything else falls back to the default with a startup warning |
 | `IP_HASH_SALT` | – (**required with Redis**) | Secret (≥32 random chars, e.g. `openssl rand -hex 32`) for the IP hash. The salt actually used is `HMAC-SHA256(IP_HASH_SALT, UTC date)`, so it rotates daily. With Redis configured and this missing, set to the old default `edgar-entity-mcp`, or shorter than 32 chars, the server refuses to start (node: exit 1; Vercel: every request gets 503 and `/health` says `misconfigured`). |
 | `API_KEY_SECRET` | – (**required with Redis**) | Secret (≥32 random chars, different from `IP_HASH_SALT`) used to sign API keys (`eem_<id>_<HMAC>`). Rotating it invalidates every minted key at once. Without Redis, minted keys are disabled. |
 | `REVOKED_KEY_IDS` | – | Comma-separated key ids (or full keys) refused immediately on every instance, without Redis — use for urgent revocation, including during degraded mode |
@@ -66,7 +66,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 
 **Reserve, then refund.** The table above is the *estimate* reserved before a call. After the call the server charges the actual cost — the number of upstream requests it made, at least 1 — and refunds the rest. A call answered from cache costs 1 unit, so cheap cached calls cannot exhaust the shared anonymous budget. Refunds are kept locally and folded into the next counter update, so they cost no Redis commands.
 
-Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`), the limit, and a hint "Need higher limits? Open an issue: <`KEY_REQUEST_URL`>". Running locally via `npx -y edgar-entity-mcp` has no quota.
+Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`), the limit, and a hint ending "Higher limits on the hosted endpoint may be requested by a person at <`KEY_REQUEST_URL`> (requests are reviewed manually and may be declined; please do not file automatically)." Degraded-mode refusals and the bad-key 429 carry no such link. Running locally via `npx -y edgar-entity-mcp` has no quota.
 
 Fair share of the upstream budget: `SEC_KEYED_RESERVED_RPS` (2 of the 6 SEC requests/s by default) is reserved for API-key callers, and each client may have at most `MAX_CONCURRENT_UPSTREAM_PER_CLIENT` (4) upstream fetches in flight. The SEC token bucket refills smoothly (one token every ~167 ms at 6 rps, burst 2).
 

@@ -6,14 +6,17 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for using edgar-entity-mcp! Tell us briefly what you need; this helps us plan capacity.
-        **This issue is public. Do not include personal data or secrets** (no emails, phone numbers, API keys, tokens or IP addresses).
+        This is a free, non-commercial hobby project. Requests are reviewed manually, may be declined, and no higher limit, uptime or support is promised. There are no paid plans.
+
+        **This issue is public. Do not include personal data or secrets**: no names, emails, phone numbers, company names, API keys, tokens or IP addresses. We will never post an API key in an issue. If we can help, we will say in the issue how to receive one privately.
+
+        Please file this yourself; do not let an AI agent file it automatically.
   - type: textarea
     id: use_case
     attributes:
       label: Use case
-      description: What are you building or researching, and which tools do you call most?
-      placeholder: e.g. an agent that screens 10-K risk factors for a portfolio of ~200 companies
+      description: Briefly, what kind of use (e.g. research, a personal project). No company or personal names needed.
+      placeholder: e.g. personal research tool comparing 10-K financials
     validations:
       required: true
   - type: input

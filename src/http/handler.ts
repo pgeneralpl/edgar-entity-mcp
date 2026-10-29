@@ -116,7 +116,7 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
       // In-memory limiter in front of any Redis work: too many bad keys from one client -> 429.
       const ipId = ipPrincipal(clientIp(req)).id;
       if (keyFailuresExceeded(ipId))
-        return rpcError(429, -32001, "Too many invalid API keys from this client. Try again later.", { hint: higherLimitsHint(c.keyRequestUrl) }, { "retry-after": "600" });
+        return rpcError(429, -32001, "Too many invalid API keys from this client. Try again later.", { hint: "Check your API key." }, { "retry-after": "600" });
       try {
         principal = await verify(key);
       } catch (e) {
@@ -129,7 +129,7 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
       }
       token = key;
     } else {
-      if (c.requireApiKey) return rpcError(401, -32001, "An API key is required.", { hint: higherLimitsHint(c.keyRequestUrl) }, { "www-authenticate": "Bearer" });
+      if (c.requireApiKey) return rpcError(401, -32001, "An API key is required.", { hint: `An API key is required on this server. A person may request one at ${c.keyRequestUrl}.` }, { "www-authenticate": "Bearer" });
       principal = ipPrincipal(clientIp(req));
       token = "anonymous";
     }
