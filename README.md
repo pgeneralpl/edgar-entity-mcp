@@ -228,14 +228,14 @@ The hosted database is on Upstash's **Fixed 250 MB** plan. Its limits, as publis
 |---|---|
 | Data size | 250 MB |
 | Bandwidth | 50 GB / month |
-| Commands | not counted or billed ("unlimited"); throughput limit 10,000 commands/s (excess briefly queued) |
+| Commands | not counted or billed ("unlimited"); throughput limit 10,000 commands/s ("Max commands per second" for Fixed 250MB in the plan table on the pricing page) |
 | Request / record size | 10 MB / 100 MB |
 | Eviction | off on this database (see [Redis memory budget](#redis-memory-budget)) |
 | At a limit | storage full: writes rejected; bandwidth used up: requests rejected. If the database has **auto-upgrade** enabled, Upstash upgrades it to the next tier instead (a cost, not an outage) |
 
 Not stated by Upstash, so assumed conservatively here: that bandwidth counts **both directions** (requests and responses, including HTTP overhead), and that "MB" is 10^6 bytes (250 MB ≈ 238 MiB). Whether auto-upgrade is enabled is a database setting this code can't see.
 
-Each `redis.call` inside a Lua script counts as a command for Upstash's per-command pricing (pay-as-you-go/free plans); on the Fixed plan only throughput and bandwidth matter. The counts below are those commands, measured with an exact emulator of the scripts in `tests/budget.test.ts` (and the REST-visible part checked against real Upstash by `scripts/live-upstash.ts`):
+Each `redis.call` inside a Lua script counts as a command for Upstash's per-command pricing (pay-as-you-go/free plans); on the Fixed plan only throughput and bandwidth matter. The counts below are those commands, measured with an exact emulator of the scripts in `tests/budget.test.ts` and `tests/cacheBudget.test.ts` (and the REST-visible part checked against real Upstash by `scripts/live-upstash.ts`):
 
 | Event | Billed commands |
 |---|---|
@@ -249,12 +249,13 @@ Each `redis.call` inside a Lua script counts as a command for Upstash's per-comm
 | MAC-valid key, first use (then memoised 5 min) | 1 (`GET`) |
 | SEC / state-portal request, fleet token granted (`EVALSHA` + `HMGET` + `HSET` + `PEXPIRE`) | 4 per upstream request; keyed callers whose reserved bucket is empty: 2 + 4 |
 | Shared cache: L1 (process memory) hit / Redis hit / miss | 0 / 1 / 1 (bytes read are charged to the call's quota, see below) |
-| Shared cache write (pipelined `INCRBY` write budget + `SET`; `SET NX EXAT` creating the budget key with its TTL once per instance per UTC day) | 2 (3 the first write of the day per instance) |
+| Shared cache write: one atomic `EVALSHA` (`GET` budget counter, `INCRBY`, `SET` value; + `SET NX EXAT` when it creates the counter) | 4 (5 when it creates the day's counter); + 1 `GET` of the counter on the first write of the day per instance |
+| Cache write refused by the script (counter has no room) | 2 (`EVALSHA` + `GET`), then 0 for the rest of the UTC day |
 | Suppression list refresh (`SMEMBERS`) | 1 per instance at cold start, then every 10 min while warm |
 | Cache write skipped: write budget exhausted, "redis full", or value > `REDIS_MAX_VALUE_BYTES` | 0 |
 | Any call in degraded mode | 0 |
 | **Whole call**: warm `search_company` (process cache) | **4** |
-| **Whole call**: cold call with 1 SEC request (quota 4, cache GET 1 + write 2, SEC token 4) | **11** (15 on the first call of the day) |
+| **Whole call**: cold call with 1 SEC request (quota 4, cache GET 1 + write 4, SEC token 4) | **13** (18 on the first call of the day) |
 
 **Redis reads are charged.** A call's actual cost is max(upstream requests including retries, Redis cache bytes read ÷ 256 KiB rounded up, 1), capped at its estimate; the rest of the estimate is refunded. A call served from the shared cache therefore can't read many large values for one unit, and Redis read volume is bounded by the quotas (≤ 256 KiB stored per unit). Not covered: the ~240 KB ticker file read once per cold instance by calls whose estimate is too small to absorb it.
 
@@ -264,18 +265,18 @@ Each `redis.call` inside a Lua script counts as a command for Upstash's per-comm
 |---|---|---|
 | Anonymous quota checks: ≤ 900 allowed calls (global hard ceiling) × 7 | 6,300 | |
 | Anonymous cache `GET`s: ≤ 900 calls × 30; bytes ≤ 900 units × 256 KiB × 4/3 | 27,000 | 315 MB |
-| Anonymous upstream requests (incl. retries, each charged): ≤ 900 × (4 token + 2 cache write) | 5,400 | |
+| Anonymous upstream requests (incl. retries, each charged): ≤ 900 × (4 token + 4 cache write) | 7,200 | |
 | Cache writes, fleet-wide: ≤ 64 MiB budget (+20 % JSON escaping on uncompressed values) | (in the row above) | 81 MB |
 | Script refusals on cold instances: 7 per instance per exhausted counter (≤ 3), ≤ 500 starts | 10,500 | |
 | `SMEMBERS` suppression refresh: 20 warm × 144 + 500 cold starts | 3,400 | < 1 MB (small set) |
-| Budget counter `SET NX EXAT`: ≤ 1 per instance per day | 500 | |
+| Budget counter `GET` (first write of the day per instance; the counter is created inside the write script) | 500 | |
 | Ticker file read per cold instance (~240 KB × 4/3, not always charged) | 500 | 160 MB |
-| Command overhead (1 KB × commands above) | | 54 MB |
-| **Anonymous tier + fleet, per day** | **≈ 54K** | **≈ 610 MB** |
-| **Per month (31 d)** | **≈ 1.7M** | **≈ 18.9 GB** |
-| Each API key at its full 500 units/day: quota 3 + key `GET` 1 per call, 30 `GET`s per call, 8 per upstream request (4 + 2 when the keyed reserve is empty, + 2 write) | ≈ 23K / day, ≈ 0.7M / month | ≈ 198 MB / day, ≈ **6.1 GB / month** |
+| Command overhead (1 KB × commands above) | | 56 MB |
+| **Anonymous tier + fleet, per day** | **≈ 56K** | **≈ 612 MB** |
+| **Per month (31 d)** | **≈ 1.7M** | **≈ 19.0 GB** |
+| Each API key at its full 500 units/day: quota 3 + key `GET` 1 per call, 30 `GET`s per call, 10 per upstream request (4 + 2 when the keyed reserve is empty, + 4 write) | ≈ 24K / day, ≈ 0.7M / month | ≈ 198 MB / day, ≈ **6.1 GB / month** |
 
-So with the defaults: the anonymous tier uses at most ~38 % of the 50 GB/month, each API key used to its full daily quota every day adds ~12 %, and ~5 such keys would reach the limit. Realistic traffic is far lower (most cached values are a few KB, not 256 KiB). Throughput is not a concern: even the whole worst-case day is ≈ 0.6 commands/s on average, far from 10,000/s. To keep a margin, size `QUOTA_KEY_PER_DAY` / per-key limits so that 18.9 GB + 6.1 GB × (fully active keys) × (per-key units ÷ 500) stays under ~40 GB. When a limit is reached anyway (and auto-upgrade is off), Redis rejects requests and the server degrades instead of failing:
+So with the defaults: the anonymous tier uses at most ~38 % of the 50 GB/month, each API key used to its full daily quota every day adds ~12 %, and ~5 such keys would reach the limit. Realistic traffic is far lower (most cached values are a few KB, not 256 KiB). Throughput is not a concern: even the whole worst-case day is ≈ 0.6 commands/s on average, far from 10,000/s. To keep a margin, size `QUOTA_KEY_PER_DAY` / per-key limits so that 19.0 GB + 6.1 GB × (fully active keys) × (per-key units ÷ 500) stays under ~40 GB. When a limit is reached anyway (and auto-upgrade is off), Redis rejects requests and the server degrades instead of failing:
 
 **Degraded mode.** If Redis errors, times out or reports its plan limit (`max requests limit`), the instance switches for 60 s at a time to:
 - local in-memory quotas (same daily limits, per instance);
@@ -289,7 +290,7 @@ So with the defaults: the anonymous tier uses at most ~38 % of the 50 GB/month, 
 
 The Upstash database runs with **eviction off**. Upstash has a single eviction policy ("optimistic-volatile": random keys, TTL keys first, then any key), so with eviction on, a full database would silently drop quota counters (resetting them, i.e. failing open), API key records and the suppression set. With eviction off, a full database rejects writes (`ERR DB capacity quota exceeded`) instead, so the cache has to stay well below the plan's data size (250 MB on the Fixed 250 MB plan, taken as 250 × 10^6 bytes ≈ 238 MiB) by itself. With the defaults, worst-case stored data is ≈ 2 × 64 MiB + < 1 MB ≈ **135 MB, ~54 % of 250 MB**:
 
-- **Daily write budget** (`CACHE_WRITE_BUDGET_BYTES`, default **64 MiB**, fleet-wide): every Redis cache write adds its stored size (value + key + 96 bytes of per-key overhead) to `eem:v1:cw:<YYYYMMDD>` with an `INCRBY` pipelined with the `SET`. The first write of the day per instance sends `SET <counter> 0 NX EXAT <next midnight + 1 h>` first, so the counter is created with its TTL (≤ 25 h) by the same command. Each instance **reserves the size locally before sending** (so concurrent writes on one instance can't overspend; tested with 50 concurrent writes) and then raises its memo to the fleet total from the reply; once the known total plus the next value would exceed the budget, that instance skips Redis cache writes **with 0 commands** until UTC midnight. Reads continue; the process-memory cache keeps working. Possible fleet overshoot: the writes already in flight on *other* instances when the budget runs out (each ≤ 256 KiB). `0` disables Redis cache writes.
+- **Daily write budget** (`CACHE_WRITE_BUDGET_BYTES`, default **64 MiB**, fleet-wide): every Redis cache write counts its stored size (value + key + 96 bytes of per-key overhead) on `eem:v1:cw:<YYYYMMDD>`, and the check and the write are **one atomic Lua script** (`EVALSHA`, `EVAL` fallback): if counter + size > budget the script returns −1 and writes nothing; otherwise it creates the counter if missing (`SET 0 NX EXAT <next midnight + 1 h>`, so the counter always has its ≤ 25 h TTL), `INCRBY`s it and `SET … EX`s the value. The counter therefore **never exceeds the budget**, whatever the number of instances or concurrent writes (tested: 10 fresh instances × 50 concurrent writes against a full counter → 0 writes; from an empty counter → exactly the budget, never more; also checked against real Upstash). Local memo, to avoid useless commands: an instance's first write of the day reads the counter once (one `GET`, shared by concurrent writes), so a cold instance facing a full counter refuses without sending any value; in-flight writes are reserved locally and replies raise the memo to max(known, fleet total + this instance's pending writes). Once the memo or the script says no, that instance skips Redis cache writes **with 0 commands** until the UTC day ends. Reads continue; the process-memory cache keeps working. `0` disables Redis cache writes.
 - **TTLs end with the day**: every Redis TTL is min(normal TTL, 24 h, time until 01:00 UTC of the next day). Entries written on a UTC day are gone 1 h after it ends, so the resident cache is one day's budget, at most two (yesterday's entries plus today's writes, and only between 00:00 and 01:00 UTC): ≤ 2 × 64 MiB ≈ 134 MB. The normal TTLs are: tickers, filing documents, parsed Form 4s 24 h; XBRL frames 12 h; filing history / facts / concepts 6 h; state searches 1 h; submissions 10 min.
 - **Max value** `REDIS_MAX_VALUE_BYTES` (default 256 KiB, measured after compression). Values ≥ 8 KB are stored gzip-compressed (level 6, base64, marked by a `\u0001gz1:` prefix; decompression capped at 32 MB); larger values stay in process memory only (values over 20 × the max are not even compressed). The SEC ticker file (`company_tickers_exchange.json`, ~520–585 KB) compresses to ~240 KB and is shared once a day (1 SEC request and one write per day fleet-wide instead of one SEC request per cold instance).
 - **"redis full"**: if a cache write still gets a capacity error (`ERR DB capacity quota exceeded`, `OOM command not allowed`), that instance stops **only cache writes** for 10 minutes (`/health` → `redis_cache.writes: "redis full"`). Quota counters, the quota script, API keys and suppression are unaffected and keep their fail-closed / degraded handling. Plan request limits (`max requests limit`) and outages still trigger degraded mode as before.

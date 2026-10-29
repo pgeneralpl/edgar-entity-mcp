@@ -153,7 +153,7 @@ try {
 
   console.log("Cache guard (write budget, compression, TTL capped at 24 h and next UTC midnight + 1 h)");
   {
-    const { UpstashCache, cacheBudgetKey, redisCacheKey, cacheWriteStatus, resetCacheWriteState, redisTtlSeconds, REDIS_ENTRY_OVERHEAD_BYTES, TTL } = await import("../src/core/cache.js");
+    const { UpstashCache, cacheBudgetKey, redisCacheKey, cacheWriteStatus, resetCacheWriteState, newCacheWriteState, redisTtlSeconds, REDIS_ENTRY_OVERHEAD_BYTES, TTL } = await import("../src/core/cache.js");
     resetCacheWriteState();
     const tr = await realFetch("https://www.sec.gov/files/company_tickers_exchange.json", { headers: { "user-agent": c.secUserAgent, accept: "application/json" } });
     const raw = await tr.text();
@@ -161,7 +161,7 @@ try {
     const uc = new UpstashCache(redis, c.redisMaxValueBytes, c.cacheWriteBudgetBytes);
     let b0 = redisRequests;
     await uc.set("livetest:tickers", raw, TTL.tickers);
-    check(redisRequests - b0 === 3, `first cache write of the day: ${redisRequests - b0} commands (SET NX EXAT + INCRBY + SET)`);
+    check(redisRequests - b0 === 2 || redisRequests - b0 === 3, `first cache write of the day: ${redisRequests - b0} REST commands (GET counter + EVALSHA, + EVAL if the script was not loaded yet)`);
     const rk = redisCacheKey("livetest:tickers");
     const stored = await redis.get<string>(rk);
     check(!!stored && stored.startsWith("\u0001gz1:") && stored.length <= c.redisMaxValueBytes, `ticker file stored gzip+base64: ${stored?.length} bytes (cap ${c.redisMaxValueBytes})`);
@@ -173,7 +173,7 @@ try {
     check((await uc.get("livetest:tickers")) === raw && redisRequests - b0 === 1, `round trip decompresses to the original (${redisRequests - b0} command)`);
     b0 = redisRequests;
     await uc.set("livetest:small", JSON.stringify({ ok: 1 }), 7 * 24 * 3600);
-    check(redisRequests - b0 === 2, `further cache write: ${redisRequests - b0} commands (INCRBY + SET)`);
+    check(redisRequests - b0 === 1, `further cache write: ${redisRequests - b0} REST command (EVALSHA: check + INCRBY + SET in one script)`);
     check((await redis.ttl(redisCacheKey("livetest:small"))) <= redisTtlSeconds(7 * 24 * 3600) + 2, "a 7-day TTL request is capped at min(24 h, next UTC midnight + 1 h) in Redis");
     const bk = cacheBudgetKey();
     const used = Number(await redis.get<string>(bk));
@@ -186,16 +186,33 @@ try {
     check(redisRequests === b0 && cacheWriteStatus().writes === "budget exhausted", `budget exhausted: 20 writes cost ${redisRequests - b0} commands`);
     b0 = redisRequests;
     check((await tight.get("livetest:small")) !== undefined && redisRequests - b0 === 1, "reads continue while the write budget is exhausted");
-    // 50 concurrent writes against a budget with room for ~10: the local reservation stops the rest.
-    resetCacheWriteState();
-    const before = Number(await redis.get<string>(bk));
-    const one = 100 + redisCacheKey("livetest:cc00").length + REDIS_ENTRY_OVERHEAD_BYTES;
-    const conc = new UpstashCache(redis, c.redisMaxValueBytes, before + 10 * one + 50);
-    await conc.set("livetest:cc-warm", "w", 60); // syncs the memo with the fleet counter
-    const mid = Number(await redis.get<string>(bk));
-    await Promise.all(Array.from({ length: 50 }, (_, i) => conc.set(`livetest:cc${String(i).padStart(2, "0")}`, "q".repeat(100), 60)));
+    // 10 fresh instances (own memo, known = 0) x 50 concurrent writes against a FULL counter: 0 writes.
+    const one = 100 + redisCacheKey("livetest:cc0-00").length + REDIS_ENTRY_OVERHEAD_BYTES;
+    const keysOf = (i: number) => Array.from({ length: 50 }, (_, j) => `livetest:cc${i}-${String(j).padStart(2, "0")}`);
+    const full = Number(await redis.get<string>(bk));
+    const fleet = Array.from({ length: 10 }, () => new UpstashCache(redis, c.redisMaxValueBytes, full, newCacheWriteState()));
+    await Promise.all(fleet.flatMap((u, i) => keysOf(i).map((k) => u.set(k, "q".repeat(100), 60))));
+    const afterFull = Number(await redis.get<string>(bk));
+    const storedFull = (await Promise.all(fleet.flatMap((_, i) => keysOf(i).map((k) => redis.exists(redisCacheKey(k)))))).reduce((a, b) => a + b, 0);
+    check(afterFull === full && storedFull === 0, `10 fresh instances x 50 concurrent writes vs a full counter: ${storedFull} writes, counter +${afterFull - full}`);
+    // Stale memos (synced before the counter filled): the atomic script itself refuses every write.
+    const staleBase = Number(await redis.get<string>(bk));
+    const staleBudget = staleBase + 10 * (2 + redisCacheKey("livetest:w0").length + REDIS_ENTRY_OVERHEAD_BYTES) + 5;
+    const stale = Array.from({ length: 10 }, () => new UpstashCache(redis, c.redisMaxValueBytes, staleBudget, newCacheWriteState()));
+    await Promise.all(stale.map((u, i) => u.set(`livetest:w${i}`, "w", 60))); // each syncs, then the 10 warm writes fill the counter
+    const filled = Number(await redis.get<string>(bk));
+    await Promise.all(stale.flatMap((u, i) => keysOf(i).map((k) => u.set(k, "q".repeat(100), 60))));
+    const afterStale = Number(await redis.get<string>(bk));
+    const storedStale = (await Promise.all(stale.flatMap((_, i) => keysOf(i).map((k) => redis.exists(redisCacheKey(k)))))).reduce((a, b) => a + b, 0);
+    check(afterStale === filled && filled <= staleBudget && storedStale === 0, `stale memos: script refused all 500 writes (${storedStale} stored, counter ${afterStale - staleBase} of ${staleBudget - staleBase} bytes of room)`);
+    // 10 fresh instances x 50 concurrent writes with room for 10 fleet-wide: never past the budget.
+    const base = Number(await redis.get<string>(bk));
+    const roomBudget = base + 10 * one + 50;
+    const fleet2 = Array.from({ length: 10 }, () => new UpstashCache(redis, c.redisMaxValueBytes, roomBudget, newCacheWriteState()));
+    await Promise.all(fleet2.flatMap((u, i) => keysOf(i).map((k) => u.set(k, "q".repeat(100), 60))));
     const after = Number(await redis.get<string>(bk));
-    check(after <= before + 10 * one + 50 + one && after - mid <= 10 * one, `50 concurrent writes: counter +${after - mid} bytes (room ${before + 10 * one + 50 - mid}, one write ${one})`);
+    const stored2 = (await Promise.all(fleet2.flatMap((_, i) => keysOf(i).map((k) => redis.exists(redisCacheKey(k)))))).reduce((a, b) => a + b, 0);
+    check(after <= roomBudget && stored2 === 10 && after - base === stored2 * one, `10 instances x 50 concurrent writes, room for 10: ${stored2} stored, counter +${after - base} of ${roomBudget - base} bytes`);
     resetCacheWriteState();
   }
 

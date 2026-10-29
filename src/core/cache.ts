@@ -75,14 +75,18 @@ export function decodeFromRedis(stored: string): string | undefined {
 
 /**
  * Cache-write guard (the Redis database runs with eviction OFF, so the cache must bound itself):
- *  - a fleet-wide daily byte budget (CACHE_WRITE_BUDGET_BYTES) counted with one INCRBY on
- *    `<prefix>cw:<YYYYMMDD>` pipelined with the SET. The first write of the day per instance also
- *    sends `SET <counter> 0 NX EXAT <midnight + 1 h>` *before* the INCRBY, so the counter is created
- *    with its TTL (<= 25 h) in the same command that creates it. Each write counts its stored size
- *    plus REDIS_ENTRY_OVERHEAD_BYTES. The size is reserved locally *before* the request is sent
- *    (concurrent writes on one instance can't overspend), then the memo is raised to the fleet total
- *    from the reply. Once the known total plus the next write would exceed the budget, writes are
- *    skipped locally with 0 commands until UTC midnight. Reads continue.
+ *  - a fleet-wide daily byte budget (CACHE_WRITE_BUDGET_BYTES) on `<prefix>cw:<YYYYMMDD>`, enforced
+ *    by ONE atomic Lua script per write (CACHE_WRITE_SCRIPT, EVALSHA with an EVAL fallback): if
+ *    counter + bytes > budget it returns -1 and writes nothing; otherwise it creates the counter with
+ *    `SET 0 NX EXAT <next UTC midnight + 1 h>` (only when missing), INCRBY's it and `SET ... EX`s the
+ *    value. The counter therefore never exceeds the budget, whatever the number of instances or
+ *    concurrent writes. Each write counts its stored size plus REDIS_ENTRY_OVERHEAD_BYTES.
+ *  - local memo (0 commands when it already says no): the first write of the day on an instance
+ *    first reads the counter (one GET, shared by concurrent writes), so a cold instance facing a
+ *    full counter refuses locally without sending any value. Pending writes are reserved locally
+ *    (`known` includes them; `pending` tracks this instance's in-flight bytes) and replies raise the
+ *    memo to max(known, fleet total + pending). Once the memo or the script says no, writes are
+ *    skipped with 0 commands until the UTC day ends. Reads continue.
  *  - every Redis TTL is capped at min(normal TTL, 24 h, next UTC midnight + 1 h - now), so entries
  *    written on one UTC day are gone 1 h after it ends: resident cache data stays about one day's
  *    budget (at most 2x, only if the next day's budget is spent within its first hour).
@@ -93,7 +97,38 @@ export function decodeFromRedis(stored: string): string | undefined {
 export const CACHE_FULL_COOLDOWN_MS = 10 * 60_000;
 /** Approximate per-key memory overhead (key metadata, expiry entry) counted on top of key + value. */
 export const REDIS_ENTRY_OVERHEAD_BYTES = 96;
-const writeState = { day: "", known: 0, exhausted: false, expireSetDay: "", fullUntil: 0, fullSince: 0 };
+
+/**
+ * KEYS = [counter, value key]. ARGV = [bytes, budget, counter EXAT, value EX, value].
+ * Returns {-1, counter} when the write does not fit (nothing written), else {1, counter after INCRBY}.
+ */
+export const CACHE_WRITE_SCRIPT = `
+local b = tonumber(ARGV[1])
+local raw = redis.call('GET', KEYS[1])
+local cur = tonumber(raw) or 0
+if cur + b > tonumber(ARGV[2]) then return {-1, cur} end
+if not raw then redis.call('SET', KEYS[1], '0', 'NX', 'EXAT', ARGV[3]) end
+local t = redis.call('INCRBY', KEYS[1], b)
+redis.call('SET', KEYS[2], ARGV[5], 'EX', ARGV[4])
+return {1, t}
+`;
+export const CACHE_WRITE_SCRIPT_SHA = createHash("sha1").update(CACHE_WRITE_SCRIPT).digest("hex");
+
+/** Per-process write memo. Exported for tests that simulate several instances in one process. */
+export interface CacheWriteState {
+  day: string;
+  known: number;
+  pending: number;
+  exhausted: boolean;
+  syncedDay: string;
+  sync?: { day: string; p: Promise<boolean> };
+  fullUntil: number;
+  fullSince: number;
+}
+export function newCacheWriteState(): CacheWriteState {
+  return { day: "", known: 0, pending: 0, exhausted: false, syncedDay: "", sync: undefined, fullUntil: 0, fullSince: 0 };
+}
+const writeState: CacheWriteState = newCacheWriteState();
 
 function utcDayOf(now: number): string {
   return new Date(now).toISOString().slice(0, 10).replace(/-/g, "");
@@ -102,23 +137,29 @@ function nextUtcMidnightSeconds(now: number): number {
   const d = new Date(now);
   return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1) / 1000);
 }
-/** Redis TTL actually used: min(ttl, 24 h, seconds until next UTC midnight + 1 h), at least 1 s. */
+/**
+ * Redis TTL actually used: min(ttl, 24 h, seconds until next UTC midnight + 1 h), at least 1 s.
+ * A non-finite TTL is never passed to Redis: +Infinity means "as long as allowed", NaN / -Infinity 1 s.
+ */
 export function redisTtlSeconds(ttlSeconds: number, now = Date.now()): number {
   const toCutoff = nextUtcMidnightSeconds(now) + 3600 - Math.floor(now / 1000);
-  return Math.max(1, Math.min(Math.round(ttlSeconds), 24 * 3600, toCutoff));
+  const ttl = Number.isFinite(ttlSeconds) ? Math.round(ttlSeconds) : ttlSeconds === Infinity ? 24 * 3600 : 1;
+  const out = Math.max(1, Math.min(ttl, 24 * 3600, toCutoff));
+  return Number.isFinite(out) ? out : 1;
 }
 export function cacheBudgetKey(now = Date.now()): string {
   return `${config().cachePrefix}cw:${utcDayOf(now)}`;
 }
-export function resetCacheWriteState(): void {
-  Object.assign(writeState, { day: "", known: 0, exhausted: false, expireSetDay: "", fullUntil: 0, fullSince: 0 });
+export function resetCacheWriteState(st: CacheWriteState = writeState): void {
+  Object.assign(st, newCacheWriteState());
 }
-function rollDay(now: number): string {
+function rollDay(st: CacheWriteState, now: number): string {
   const day = utcDayOf(now);
-  if (writeState.day !== day) Object.assign(writeState, { day, known: 0, exhausted: false });
+  // `pending` is kept: in-flight writes settle against the day they were sent on (checked below).
+  if (st.day !== day) Object.assign(st, { day, known: 0, exhausted: false });
   return day;
 }
-export function cacheWriteStatus(now = Date.now()): {
+export function cacheWriteStatus(now = Date.now(), st: CacheWriteState = writeState): {
   writes: "ok" | "redis full" | "budget exhausted" | "disabled";
   budget_bytes: number;
   known_used_bytes: number;
@@ -126,20 +167,24 @@ export function cacheWriteStatus(now = Date.now()): {
   until?: string;
 } {
   const budget = config().cacheWriteBudgetBytes;
-  rollDay(now);
-  const base = { budget_bytes: budget, known_used_bytes: writeState.known };
-  if (now < writeState.fullUntil)
-    return { writes: "redis full", ...base, since: new Date(writeState.fullSince).toISOString(), until: new Date(writeState.fullUntil).toISOString() };
+  rollDay(st, now);
+  const base = { budget_bytes: budget, known_used_bytes: st.known };
+  if (now < st.fullUntil)
+    return { writes: "redis full", ...base, since: new Date(st.fullSince).toISOString(), until: new Date(st.fullUntil).toISOString() };
   if (budget <= 0) return { writes: "disabled", ...base };
-  if (writeState.exhausted) return { writes: "budget exhausted", ...base, until: new Date(nextUtcMidnightSeconds(now) * 1000).toISOString() };
+  if (st.exhausted) return { writes: "budget exhausted", ...base, until: new Date(nextUtcMidnightSeconds(now) * 1000).toISOString() };
   return { writes: "ok", ...base };
 }
-function markCacheFull(why: unknown, now: number): void {
-  if (now >= writeState.fullUntil) {
-    writeState.fullSince = now;
+function markCacheFull(st: CacheWriteState, why: unknown, now: number): void {
+  if (now >= st.fullUntil) {
+    st.fullSince = now;
     logError("redis-full", why);
   }
-  writeState.fullUntil = now + CACHE_FULL_COOLDOWN_MS;
+  st.fullUntil = now + CACHE_FULL_COOLDOWN_MS;
+}
+function onWriteError(st: CacheWriteState, e: unknown, now: number): void {
+  if (isRedisCapacityError(e)) markCacheFull(st, e, now);
+  else markRedisDegraded(e);
 }
 
 export class UpstashCache implements Cache {
@@ -148,6 +193,7 @@ export class UpstashCache implements Cache {
     readonly redis: Redis,
     private maxValueBytes: number,
     private budgetBytes: number = config().cacheWriteBudgetBytes,
+    private st: CacheWriteState = writeState,
   ) {}
   async get(key: string) {
     if (redisDegraded()) return undefined; // save commands / latency while Redis is down or over plan
@@ -155,50 +201,82 @@ export class UpstashCache implements Cache {
       const v = await this.redis.get<string>(redisCacheKey(key));
       if (v == null) return undefined;
       const s = String(v);
-      // Redis read volume is charged to the call's quota (bandwidth bound, see settleQuota).
+      // Redis read volume (bytes on the wire) is charged to the call's quota (bandwidth bound, see settleQuota).
       const ctx = currentContext();
-      if (ctx) ctx.redisReadBytes = (ctx.redisReadBytes ?? 0) + s.length;
+      if (ctx) ctx.redisReadBytes = (ctx.redisReadBytes ?? 0) + Buffer.byteLength(s, "utf8");
       return decodeFromRedis(s);
     } catch (e) {
       markRedisDegraded(e);
       return undefined; // cache failures must never break tools
     }
   }
+  /** First write of the day on this instance: read the fleet counter once (shared by concurrent writes). */
+  private syncCounter(bkey: string, day: string, now: number): Promise<boolean> {
+    const st = this.st;
+    if (st.syncedDay === day) return Promise.resolve(true);
+    if (st.sync?.day === day) return st.sync.p;
+    const p = this.redis.get<string>(bkey).then(
+      (v) => {
+        if (st.day === day) {
+          const fleet = Number(v ?? 0);
+          if (Number.isFinite(fleet)) st.known = Math.max(st.known, fleet + st.pending);
+          st.syncedDay = day;
+        }
+        st.sync = undefined;
+        return true;
+      },
+      (e) => {
+        st.sync = undefined; // retried by a later write
+        onWriteError(st, e, now);
+        return false;
+      },
+    );
+    st.sync = { day, p };
+    return p;
+  }
+  private async runScript(keys: string[], args: string[]): Promise<unknown> {
+    try {
+      return await this.redis.evalsha(CACHE_WRITE_SCRIPT_SHA, keys, args);
+    } catch (e) {
+      if (!/NOSCRIPT/i.test(String(e))) throw e;
+      return await this.redis.eval(CACHE_WRITE_SCRIPT, keys, args);
+    }
+  }
   async set(key: string, value: string, ttlSeconds: number) {
     if (redisDegraded() || this.budgetBytes <= 0) return;
+    const st = this.st;
     const now = Date.now();
-    if (now < writeState.fullUntil) return; // "redis full": 0 commands
-    const day = rollDay(now);
-    if (writeState.exhausted) return; // budget exhausted until UTC midnight: 0 commands
+    if (now < st.fullUntil) return; // "redis full": 0 commands
+    const day = rollDay(st, now);
+    if (st.exhausted) return; // budget exhausted until UTC midnight: 0 commands
     if (value.length > REDIS_COMPRESS_MAX_RATIO * this.maxValueBytes) return; // can't fit: don't spend CPU on gzip
     const stored = encodeForRedis(value);
     const rkey = redisCacheKey(key);
-    if (Buffer.byteLength(stored, "utf8") > this.maxValueBytes) return;
-    const bytes = Buffer.byteLength(stored, "utf8") + rkey.length + REDIS_ENTRY_OVERHEAD_BYTES;
-    if (writeState.known + bytes > this.budgetBytes) {
-      writeState.exhausted = true;
+    const storedBytes = Buffer.byteLength(stored, "utf8");
+    if (storedBytes > this.maxValueBytes) return;
+    const bytes = storedBytes + Buffer.byteLength(rkey, "utf8") + REDIS_ENTRY_OVERHEAD_BYTES;
+    const bkey = `${config().cachePrefix}cw:${day}`;
+    if (!(await this.syncCounter(bkey, day, now))) return;
+    if (st.day !== day || st.exhausted || Date.now() < st.fullUntil) return;
+    if (st.known + bytes > this.budgetBytes) {
+      st.exhausted = true; // local memo says no: 0 commands until the UTC day ends
       return;
     }
-    writeState.known += bytes; // reserve before the await: concurrent writes see it
-    const bkey = `${config().cachePrefix}cw:${day}`;
-    const createCounter = writeState.expireSetDay !== day;
+    st.known += bytes; // reserve before the await: concurrent writes on this instance see it
+    st.pending += bytes;
+    let res: unknown;
     try {
-      const p = this.redis.pipeline();
-      // Creates the counter with its TTL atomically; a no-op when it already exists.
-      if (createCounter) p.set(bkey, "0", { nx: true, exat: nextUtcMidnightSeconds(now) + 3600 });
-      p.incrby(bkey, bytes);
-      p.set(rkey, stored, { ex: redisTtlSeconds(ttlSeconds, now) });
-      const res = (await p.exec()) as unknown[];
-      if (createCounter) writeState.expireSetDay = day;
-      const total = Number(res[createCounter ? 1 : 0]);
-      if (writeState.day === day && Number.isFinite(total)) {
-        writeState.known = Math.max(writeState.known, total);
-        if (writeState.known >= this.budgetBytes) writeState.exhausted = true;
-      }
+      res = await this.runScript([bkey, rkey], [String(bytes), String(this.budgetBytes), String(nextUtcMidnightSeconds(now) + 3600), String(redisTtlSeconds(ttlSeconds, now)), stored]);
     } catch (e) {
-      if (isRedisCapacityError(e)) markCacheFull(e, now);
-      else markRedisDegraded(e);
+      onWriteError(st, e, now);
+      return; // the reservation stays in `known` (conservative)
+    } finally {
+      st.pending -= bytes;
     }
+    const [ok, total] = Array.isArray(res) ? res.map(Number) : [NaN, NaN];
+    if (st.day !== day) return;
+    if (Number.isFinite(total)) st.known = Math.max(st.known, total! + st.pending);
+    if (ok === -1 || st.known >= this.budgetBytes) st.exhausted = true; // memoised until the UTC day ends
   }
 }
 

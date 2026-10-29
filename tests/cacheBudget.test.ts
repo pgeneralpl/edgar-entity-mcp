@@ -8,6 +8,8 @@ import { Redis } from "@upstash/redis";
 import { loadConfig, resetConfig } from "../src/config.js";
 import {
   CACHE_FULL_COOLDOWN_MS,
+  CACHE_WRITE_SCRIPT_SHA,
+  newCacheWriteState,
   MemoryCache,
   TTL,
   TieredCache,
@@ -73,18 +75,33 @@ describe("config defaults", () => {
 });
 
 describe("daily fleet-wide cache-write budget", () => {
-  it("costs INCRBY + SET per write (+ SET NX EXAT once per day), the counter key is created with a <= 25 h TTL", async () => {
+  it("one atomic EVALSHA per write (+1 GET of the counter once per instance per day); the counter is created with a <= 25 h TTL", async () => {
     const c = new UpstashCache(redis, 10_000, 1_000_000);
-    expect(await billed(() => c.set("a", "x".repeat(100), 60))).toBe(3);
-    expect(await billed(() => c.set("b", "y".repeat(100), 60))).toBe(2);
+    expect(await billed(() => c.set("a", "x".repeat(100), 60))).toBe(6); // GET + EVALSHA{GET, SET NX EXAT, INCRBY, SET}
+    expect(await billed(() => c.set("b", "y".repeat(100), 60))).toBe(4); // EVALSHA{GET, INCRBY, SET}
     const bk = cacheBudgetKey();
     expect(bk).toBe("eem:v1:cw:20261029");
     const counter = f.kv.get(bk)!;
     expect(Number(counter.v)).toBe(2 * (100 + redisCacheKey("a").length + REDIS_ENTRY_OVERHEAD_BYTES));
     expect(counter.ttl).toBe(12 * 3600 + 3600); // UTC midnight + 1 h, i.e. at most 25 h
-    expect(f.commands.map((x) => String(x[0]).toLowerCase())).toEqual(["set", "incrby", "set", "incrby", "set"]);
-    expect(f.commands[0]!.map((x) => String(x).toLowerCase())).toEqual([ "set", bk, "0", "nx", "exat", String(Math.floor(T0 / 1000) + 13 * 3600)]);
+    expect(f.commands.map((x) => String(x[0]).toLowerCase())).toEqual(["get", "evalsha", "evalsha"]);
+    expect(f.internal).toEqual(["GET", "SET", "INCRBY", "SET", "GET", "INCRBY", "SET"]);
+    const ev = f.commands[1]!.map(String).slice(1);
+    expect(ev[0]).toBe(CACHE_WRITE_SCRIPT_SHA);
+    expect(ev.slice(1, 4)).toEqual(["2", bk, redisCacheKey("a")]);
+    expect(ev.slice(4, 8)).toEqual([String(100 + redisCacheKey("a").length + REDIS_ENTRY_OVERHEAD_BYTES), "1000000", String(Math.floor(T0 / 1000) + 13 * 3600), "60"]);
     expect(await c.get("a")).toBe("x".repeat(100));
+  });
+
+  it("falls back to EVAL when the script is not loaded (NOSCRIPT)", async () => {
+    const c = new UpstashCache(redis, 10_000, 1_000_000);
+    f.state.noscript = true;
+    await c.set("a", "x", 60);
+    expect(f.commands.map((x) => String(x[0]).toLowerCase())).toEqual(["get", "evalsha", "eval"]);
+    expect(f.kv.get(redisCacheKey("a"))?.v).toBe("x");
+    expect(redisDegraded()).toBe(false);
+    await c.set("b", "y", 60);
+    expect(String(f.commands.at(-1)![0]).toLowerCase()).toBe("evalsha");
   });
 
   it("once exhausted: 0 commands for writes until UTC midnight, reads continue", async () => {
@@ -102,16 +119,31 @@ describe("daily fleet-wide cache-write budget", () => {
     expect(await c.get("k1")).toBe(v);
     vi.setSystemTime(Date.UTC(2026, 9, 30, 0, 0, 1)); // next UTC day
     expect(cacheWriteStatus().writes).toBe("ok");
-    expect(await billed(() => c.set("k3", v, 60))).toBe(3); // new day's counter (SET NX EXAT) + INCRBY + SET
+    expect(await billed(() => c.set("k3", v, 60))).toBe(6); // new day: GET + EVALSHA{GET, SET NX EXAT, INCRBY, SET}
     expect(f.kv.has("eem:v1:cw:20261030")).toBe(true);
   });
 
-  it("is fleet-wide: bytes written by other instances (INCRBY result) exhaust this one", async () => {
+  it("is fleet-wide: a fresh instance reads the counter first and refuses locally without sending the value", async () => {
     const c = new UpstashCache(redis, 10_000, 10_000);
     f.kv.set(cacheBudgetKey(), { v: "9990", ttl: 3600 }); // the rest of the fleet wrote ~10 KB today
-    await c.set("a", "x".repeat(50), 60); // allowed locally (known 0), counter now > budget
+    expect(await billed(() => c.set("a", "x".repeat(50), 60))).toBe(1); // 1 GET of the counter, no EVALSHA
+    expect(f.kv.has(redisCacheKey("a"))).toBe(false);
     expect(cacheWriteStatus().writes).toBe("budget exhausted");
     expect(await billed(() => c.set("b", "x", 60))).toBe(0);
+    expect(f.kv.get(cacheBudgetKey())!.v).toBe("9990");
+  });
+
+  it("the script refuses (and nothing is written) when other instances filled the counter after this one synced", async () => {
+    const c = new UpstashCache(redis, 10_000, 10_000);
+    await c.set("warm", "w", 60); // synced: known ~146
+    f.kv.set(cacheBudgetKey(), { v: "9990", ttl: 3600 }); // the fleet fills the counter meanwhile
+    expect(await billed(() => c.set("a", "x".repeat(50), 60))).toBe(2); // EVALSHA{GET} -> -1, no INCRBY, no SET
+    expect(f.kv.has(redisCacheKey("a"))).toBe(false);
+    expect(f.kv.get(cacheBudgetKey())!.v).toBe("9990");
+    expect(cacheWriteStatus().writes).toBe("budget exhausted"); // memoised until the UTC day ends
+    expect(await billed(() => c.set("b", "x", 60))).toBe(0);
+    vi.setSystemTime(Date.UTC(2026, 9, 30, 0, 0, 1));
+    expect(cacheWriteStatus().writes).toBe("ok");
   });
 
   it("CACHE_WRITE_BUDGET_BYTES=0 disables Redis cache writes (0 commands), memory tier still works", async () => {
@@ -149,6 +181,11 @@ describe("TTLs", () => {
     expect(redisTtlSeconds(24 * 3600, Date.UTC(2026, 9, 29, 0, 0, 0))).toBe(24 * 3600); // 24 h cap
     expect(redisTtlSeconds(6 * 3600, Date.UTC(2026, 9, 29, 23, 59, 59))).toBe(3601);
     expect(redisTtlSeconds(0)).toBe(1);
+    expect(redisTtlSeconds(NaN)).toBe(1); // non-finite TTLs never reach Redis
+    expect(redisTtlSeconds(-Infinity)).toBe(1);
+    expect(redisTtlSeconds(Infinity, Date.UTC(2026, 9, 29, 0, 0, 0))).toBe(24 * 3600);
+    await c.set("nan", "text", NaN);
+    expect(f.kv.get(redisCacheKey("nan"))!.ttl).toBe(1);
   });
 });
 
@@ -172,7 +209,7 @@ describe("max value size and compression", () => {
     const raw = tickers();
     expect(raw.length).toBeGreaterThan(256 * 1024);
     const c = new UpstashCache(redis, 256 * 1024, 150 * 1024 * 1024);
-    expect(await billed(() => c.set("tickers", raw, TTL.tickers))).toBe(3);
+    expect(await billed(() => c.set("tickers", raw, TTL.tickers))).toBe(6);
     const stored = f.kv.get(redisCacheKey("tickers"))!.v;
     expect(stored.startsWith("\u0001gz1:")).toBe(true);
     expect(stored.length).toBeLessThanOrEqual(256 * 1024);
@@ -227,7 +264,7 @@ describe("'redis full' (eviction off, data-size limit reached) disables only cac
     expect(await billed(() => chargeQuota(p, "search_company", {}, store))).toBe(3); // EVALSHA + INCRBY + EXPIRE (first of day)
     vi.setSystemTime(T0 + CACHE_FULL_COOLDOWN_MS + 1);
     expect(cacheWriteStatus().writes).toBe("ok");
-    expect(await billed(() => c.set("b", "2", 60))).toBe(2);
+    expect(await billed(() => c.set("b", "2", 60))).toBe(4); // EVALSHA{GET, INCRBY, SET}
   });
 
   it("a capacity error from the quota script still enters degraded mode (fail-closed path unchanged), reported as 'redis full'", async () => {
@@ -263,6 +300,58 @@ describe("review fixes: concurrency, counter TTL, gzip guard, health privacy, re
     expect(cacheWriteStatus().writes).toBe("budget exhausted");
   });
 
+  it("10 fresh instances x 50 concurrent writes against a full counter: 0 writes", async () => {
+    const budget = 5_000;
+    f.kv.set(cacheBudgetKey(), { v: String(budget), ttl: 3600 }); // counter already full
+    const fleet = Array.from({ length: 10 }, () => newCacheWriteState()); // known = 0 on every instance
+    const caches = fleet.map((st) => new UpstashCache(redis, 10_000, budget, st));
+    const keys = (i: number) => Array.from({ length: 50 }, (_, j) => `f${i}-${j}`);
+    await Promise.all(caches.flatMap((c, i) => keys(i).map((k) => c.set(k, "z".repeat(100), 60))));
+    expect(f.kv.get(cacheBudgetKey())!.v).toBe(String(budget));
+    expect([...f.kv.keys()].filter((k) => k.includes(":c:"))).toEqual([]);
+    expect(fleet.every((st) => st.exhausted)).toBe(true);
+    // The same with stale memos (each instance synced while the counter was empty): the atomic
+    // script refuses every write, nothing is stored and the counter is unchanged.
+    f.kv.delete(cacheBudgetKey());
+    const stale = Array.from({ length: 10 }, () => newCacheWriteState());
+    const sc = stale.map((st) => new UpstashCache(redis, 10_000, budget, st));
+    await Promise.all(sc.map((c, i) => c.set(`warm${i}`, "w", 60)));
+    f.kv.set(cacheBudgetKey(), { v: String(budget), ttl: 3600 });
+    const before = f.internal.filter((x) => x === "SET").length;
+    await Promise.all(sc.flatMap((c, i) => keys(i).map((k) => c.set(k, "z".repeat(100), 60))));
+    expect(f.internal.filter((x) => x === "SET").length).toBe(before); // no value SET, no counter SET
+    expect(f.kv.get(cacheBudgetKey())!.v).toBe(String(budget));
+    for (let i = 0; i < 10; i++) for (const k of keys(i)) expect(f.kv.has(redisCacheKey(k))).toBe(false);
+    expect(stale.every((st) => st.exhausted && st.pending === 0)).toBe(true);
+  });
+
+  it("10 instances x 50 concurrent writes from an empty counter never exceed the fleet budget", async () => {
+    const one = 100 + redisCacheKey("x").length + REDIS_ENTRY_OVERHEAD_BYTES;
+    const budget = 20 * one + 50; // room for 20 writes fleet-wide; each instance alone would allow 20
+    const fleet = Array.from({ length: 10 }, () => newCacheWriteState());
+    const caches = fleet.map((st) => new UpstashCache(redis, 10_000, budget, st));
+    await Promise.all(caches.flatMap((c, i) => Array.from({ length: 50 }, (_, j) => c.set(`g${i}-${j}`, "z".repeat(100), 60))));
+    const used = Number(f.kv.get(cacheBudgetKey())!.v);
+    expect(used).toBeLessThanOrEqual(budget);
+    const stored = [...f.kv.keys()].filter((k) => k.includes(":c:")).length;
+    expect(stored).toBe(20);
+    expect(stored * one).toBe(used);
+    expect(fleet.every((st) => st.pending === 0)).toBe(true);
+  });
+
+  it("the memo counts this instance's in-flight writes on top of the fleet total", async () => {
+    const st = newCacheWriteState();
+    const c = new UpstashCache(redis, 10_000, 1_000_000, st);
+    await c.set("warm", "w", 60);
+    const one = 100 + redisCacheKey("x").length + REDIS_ENTRY_OVERHEAD_BYTES;
+    const seen: number[] = [];
+    vi.stubGlobal("fetch", (u: RequestInfo | URL, i?: RequestInit) => (seen.push(st.pending), f.fetchStub(u, i)));
+    await Promise.all([c.set("p1", "z".repeat(100), 60), c.set("p2", "z".repeat(100), 60), c.set("p3", "z".repeat(100), 60)]);
+    expect(Math.max(...seen)).toBe(3 * one); // all three reserved while in flight
+    expect(st.pending).toBe(0);
+    expect(st.known).toBeGreaterThanOrEqual(Number(f.kv.get(cacheBudgetKey())!.v));
+  });
+
   it("the budget counter gets its TTL in the command that creates it (no separate EXPIREAT to fail)", async () => {
     const c = new UpstashCache(redis, 10_000, 1_000_000);
     await c.set("a", "x", 60);
@@ -280,7 +369,7 @@ describe("review fixes: concurrency, counter TTL, gzip guard, health privacy, re
     const c = new UpstashCache(redis, 1000, 1_000_000);
     expect(REDIS_COMPRESS_MAX_RATIO).toBe(20);
     expect(await billed(() => c.set("huge", "a".repeat(20_001), 60))).toBe(0); // would compress to << 1000, but is skipped
-    expect(await billed(() => c.set("ok", "a".repeat(19_999), 60))).toBe(3); // compressible and under 20x: stored
+    expect(await billed(() => c.set("ok", "a".repeat(19_999), 60))).toBe(6); // compressible and under 20x: stored (first write of the day)
     expect(f.kv.get(redisCacheKey("ok"))!.v.startsWith("\u0001gz1:")).toBe(true);
   });
 
@@ -315,5 +404,17 @@ describe("review fixes: concurrency, counter TTL, gzip guard, health privacy, re
     expect(refunds).toEqual([2]); // 3 units charged: ceil(2 * 256 KiB + 1 / 256 KiB)
     await settle(2);
     expect(refunds).toEqual([2]); // capped at the 2-unit estimate: nothing refunded
+  });
+
+  it("read bytes are counted in UTF-8 bytes, not UTF-16 string length", async () => {
+    const c = new UpstashCache(redis, 10 * 1024 * 1024, 1_000_000);
+    const v = "\u20ac".repeat(1000); // 1000 chars, 3000 UTF-8 bytes
+    f.kv.set(redisCacheKey("eur"), { v });
+    const bytes = await runWithContext({ transport: "http" }, async () => {
+      const ctx = (await import("../src/core/context.js")).currentContext()!;
+      expect(await c.get("eur")).toBe(v);
+      return ctx.redisReadBytes;
+    });
+    expect(bytes).toBe(3000);
   });
 });

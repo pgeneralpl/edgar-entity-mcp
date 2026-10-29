@@ -1,4 +1,5 @@
 import { vi } from "vitest";
+import { CACHE_WRITE_SCRIPT, CACHE_WRITE_SCRIPT_SHA } from "../../src/core/cache.js";
 
 export const FAKE = "https://fake-upstash.test";
 
@@ -59,6 +60,25 @@ export function fakeUpstash() {
       });
     return [bad, ...vals];
   };
+  /** JS port of CACHE_WRITE_SCRIPT in src/core/cache.ts (same semantics and same inner commands). */
+  const cacheWriteScript = (keys: string[], args: string[]): unknown => {
+    const [ckey, vkey] = keys as [string, string];
+    const [b, budget, exat, ex] = args.slice(0, 4).map(Number) as [number, number, number, number];
+    inner("GET");
+    const raw = kv.get(ckey);
+    const cur = raw ? Number(raw.v) || 0 : 0;
+    if (cur + b > budget) return [-1, cur];
+    if (!raw) {
+      inner("SET");
+      kv.set(ckey, { v: "0", ttl: exat - Math.floor(Date.now() / 1000) });
+    }
+    inner("INCRBY");
+    const t = cur + b;
+    kv.set(ckey, { v: String(t), ttl: kv.get(ckey)!.ttl });
+    inner("SET");
+    kv.set(vkey, { v: args[4]!, ttl: ex });
+    return [1, t];
+  };
   const exec = (cmd: unknown[]): unknown => {
     commands.push(cmd);
     billed.n++;
@@ -103,6 +123,7 @@ export function fakeUpstash() {
         const nkeys = Number(a[1]);
         const keys = a.slice(2, 2 + nkeys);
         const args = a.slice(2 + nkeys);
+        if (a[0] === CACHE_WRITE_SCRIPT_SHA || a[0] === CACHE_WRITE_SCRIPT) return cacheWriteScript(keys, args);
         if (args.length === 5) {
           // @upstash/ratelimit tokenBucket: HMGET + HSET + PEXPIRE when a token is granted.
           inner("HMGET");
@@ -118,11 +139,19 @@ export function fakeUpstash() {
     }
   };
   /** Set to an Upstash error string (e.g. the plan-limit message) to make every command fail. */
-  const state: { failWith?: string; full?: boolean } = {};
+  /** `state.noscript`: EVALSHA fails with NOSCRIPT until the next EVAL loads the script (like a fresh Redis). */
+  const state: { failWith?: string; full?: boolean; noscript?: boolean } = {};
   /** `state.full`: emulate a database at its data-size limit with eviction off (writes rejected, reads served). */
   const FULL_ERR = "ERR DB capacity quota exceeded";
   const WRITES = new Set(["set", "incrby", "incr", "expire", "expireat", "evalsha", "eval", "hset", "sadd"]);
   const run = (c: unknown[]): { result?: unknown; error?: string } => {
+    const op = String(c[0]).toLowerCase();
+    if (state.noscript && op === "evalsha") {
+      commands.push(c);
+      billed.n++;
+      return { error: "NOSCRIPT No matching script. Please use EVAL." };
+    }
+    if (op === "eval") state.noscript = false;
     if (state.full && WRITES.has(String(c[0]).toLowerCase())) {
       commands.push(c);
       billed.n++;
