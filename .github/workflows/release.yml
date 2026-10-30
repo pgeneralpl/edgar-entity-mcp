@@ -37,9 +37,20 @@ jobs:
           if node -e "process.exit(require('./server.json').packages?.length ? 0 : 1)"; then
             echo "::error::server.json must not list packages (npm is deprecated)"; exit 1
           fi
-      - name: Install mcp-publisher
+      - name: Install mcp-publisher (pinned, sha256-verified)
+        env:
+          # Pinned release of github.com/modelcontextprotocol/registry. To bump: take the hash for
+          # mcp-publisher_linux_amd64.tar.gz from that release's registry_<version>_checksums.txt.
+          MCP_PUBLISHER_VERSION: "1.8.6"
+          MCP_PUBLISHER_SHA256: "1fbe93fc0783c2394d8012c8d6e50a59e98cb2cc2d216264cc69f405d0e21340"
         run: |
-          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          curl -fsSL -o mcp-publisher_linux_amd64.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher_linux_amd64.tar.gz" | sha256sum -c - \
+            || { echo "::error::mcp-publisher v${MCP_PUBLISHER_VERSION} sha256 mismatch"; exit 1; }
+          tar xzf mcp-publisher_linux_amd64.tar.gz mcp-publisher
+          rm mcp-publisher_linux_amd64.tar.gz
+          ./mcp-publisher --version
       - name: Publish to the MCP Registry
         run: |
           ./mcp-publisher login github-oidc
