@@ -54,6 +54,12 @@
       "headers": [
         { "key": "Content-Security-Policy", "value": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" }
       ]
+    },
+    {
+      "source": "/guides/(sec-edgar-mcp)(\\.html)?",
+      "headers": [
+        { "key": "Content-Security-Policy", "value": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'" }
+      ]
     }
   ]
 }
