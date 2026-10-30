@@ -8,7 +8,7 @@ describe("Form 4 parser", () => {
   const p = parseForm4(xml);
   it("parses issuer and reporter", () => {
     expect(p.issuer).toEqual({ cik: "0000320193", name: "Apple Inc.", ticker: "AAPL" });
-    expect(p.reporters[0]).toMatchObject({ name: "Borders Ben", roles: ["Officer"], officer_title: "Principal Accounting Officer" });
+    expect(p.reporters[0]).toMatchObject({ name: "Example Jane", roles: ["Officer"], officer_title: "Principal Accounting Officer" });
     expect(p.rule_10b5_1).toBe(true);
   });
   it("parses non-derivative transactions", () => {
