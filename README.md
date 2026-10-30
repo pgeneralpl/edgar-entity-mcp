@@ -1,8 +1,8 @@
 # edgar-entity-mcp
 
-[![npm](https://img.shields.io/npm/v/edgar-entity-mcp.svg)](https://www.npmjs.com/package/edgar-entity-mcp) [![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CI](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/pgeneralpl/edgar-entity-mcp/actions/workflows/ci.yml) [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · npm: https://www.npmjs.com/package/edgar-entity-mcp · MCP Registry: [`io.github.pgeneralpl/edgar-entity-mcp`](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.pgeneralpl/edgar-entity-mcp)
+Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github.com/pgeneralpl/edgar-entity-mcp/issues · MCP Registry: [`io.github.pgeneralpl/edgar-entity-mcp`](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.pgeneralpl/edgar-entity-mcp)
 
 **US company research for AI agents, from official public data.** One MCP server that covers SEC EDGAR (filings, XBRL financials, Form 4 insider trades, cross-company comparisons) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA). Responses are compact JSON with source URLs, sized to keep token use low.
 
@@ -12,9 +12,9 @@ Source: https://github.com/pgeneralpl/edgar-entity-mcp · Issues: https://github
 
 No API keys are needed for the data. SEC asks you to identify yourself with a User-Agent (see [SEC User-Agent](#sec-user-agent-and-rate-limits)).
 
-```
-npx -y edgar-entity-mcp        # stdio MCP server
-```
+Hosted endpoint (no install): `https://edgar-entity-mcp.vercel.app/mcp`. See [Install](#install).
+
+> The npm package `edgar-entity-mcp` (0.1.0) is **deprecated and no longer maintained**. Use the hosted endpoint, or run the server from this repository's source.
 
 ---
 
@@ -136,38 +136,49 @@ Other quick examples:
 
 ## Install
 
-Three ways to connect: the hosted endpoint `https://edgar-entity-mcp.vercel.app/mcp` (no install, see *Remote* below), the npm package [`edgar-entity-mcp`](https://www.npmjs.com/package/edgar-entity-mcp) over stdio (**Node.js ≥ 22.23.4 or ≥ 24.22.1**), or any client that installs from the official [MCP Registry](https://registry.modelcontextprotocol.io) entry `io.github.pgeneralpl/edgar-entity-mcp`.
+Use the hosted endpoint (recommended; no install), or run the server yourself from this repository's source. The server is also listed in the official [MCP Registry](https://registry.modelcontextprotocol.io) as `io.github.pgeneralpl/edgar-entity-mcp` (remote endpoint).
 
-Quick check: `npx -y edgar-entity-mcp --version`
+> The npm package `edgar-entity-mcp` (0.1.0) is deprecated and no longer maintained; do not install it.
 
-> **Node.js version (stdio users):** run the package on a patched Node.js — **22.23.4+ (22.x) or 24.22.1+ (24.x, recommended)**, or 26.12.1+. These releases (2026-10-21) fix CVE-2026-111497, a Brotli decoder out-of-bounds write that a malicious server response decoded by `fetch()` could trigger, plus TLS hostname-verification bypasses. Node.js 20 is end-of-life and will not get the fix. Check with `node -v`; the server prints a warning on stderr when started on an unpatched Node.js. The hosted endpoint runs on Vercel's managed Node.js 24.x runtime, which Vercel patches itself. `engines.node` is `24.x` (it pins the Vercel runtime), so npm prints an `EBADENGINE` notice on 22.x — that is expected and harmless on 22.23.4+.
-
-### Claude Desktop / Claude Code / Cursor / Windsurf / VS Code (stdio via npx)
-
-```json
-{
-  "mcpServers": {
-    "edgar-entity": {
-      "command": "npx",
-      "args": ["-y", "edgar-entity-mcp"],
-      "env": { "SEC_USER_AGENT": "Your Name or Company you@example.com" }
-    }
-  }
-}
-```
-- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
-- **Cursor**: `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project).
-- **Claude Code**: `claude mcp add edgar-entity -e SEC_USER_AGENT="Your Name you@example.com" -- npx -y edgar-entity-mcp`
-- **VS Code**: `.vscode/mcp.json` using `"servers"` in place of `"mcpServers"`.
-
-### Remote (Streamable HTTP)
+### Remote (Streamable HTTP), recommended
 
 Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses a shared cache, stays well below the SEC fair-access rate, and applies per-client quotas (see [Hosted limits](#hosted-limits)).
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
 ```
-For clients that only speak stdio: `"command": "npx", "args": ["-y", "mcp-remote", "https://edgar-entity-mcp.vercel.app/mcp"]`.
+- **Claude Code**: `claude mcp add --transport http edgar-entity https://edgar-entity-mcp.vercel.app/mcp`
+- **Cursor**: `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project).
+- **VS Code**: `.vscode/mcp.json` using `"servers"` in place of `"mcpServers"`.
+
+For clients that only speak stdio: `"command": "npx", "args": ["-y", "mcp-remote", "https://edgar-entity-mcp.vercel.app/mcp"]` (`mcp-remote` is a third-party bridge, not part of this project).
+
+### Run locally from source (stdio)
+
+```bash
+git clone https://github.com/pgeneralpl/edgar-entity-mcp.git
+cd edgar-entity-mcp
+npm ci && npm run build
+SEC_USER_AGENT="Your Name you@example.com" node dist/stdio.js --version
+```
+
+Then point your client at the built file (use the absolute path of your clone):
+
+```json
+{
+  "mcpServers": {
+    "edgar-entity": {
+      "command": "node",
+      "args": ["/absolute/path/to/edgar-entity-mcp/dist/stdio.js"],
+      "env": { "SEC_USER_AGENT": "Your Name or Company you@example.com" }
+    }
+  }
+}
+```
+- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
+- **Claude Code**: `claude mcp add edgar-entity -e SEC_USER_AGENT="Your Name you@example.com" -- node /absolute/path/to/edgar-entity-mcp/dist/stdio.js`
+
+> **Node.js version (local use):** use a patched Node.js — **22.23.4+ (22.x) or 24.22.1+ (24.x, recommended)**, or 26.12.1+. These releases (2026-10-21) fix CVE-2026-111497, a Brotli decoder out-of-bounds write that a malicious server response decoded by `fetch()` could trigger, plus TLS hostname-verification bypasses. Node.js 20 is end-of-life and will not get the fix. Check with `node -v`; the server prints a warning on stderr when started on an unpatched Node.js. The hosted endpoint runs on Vercel's managed Node.js 24.x runtime, which Vercel patches itself. `engines.node` is `24.x` (it pins the Vercel runtime), so `npm ci` prints an `EBADENGINE` notice on 22.x — that is expected and harmless on 22.23.4+.
 
 ### Self-host the HTTP server
 
@@ -189,7 +200,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 
 ## Hosted limits
 
-The hosted endpoint is a free beta with low limits. Anonymous clients get **up to 60 units per day per IP (shared networks may get less) and 30 per minute**, within shared daily budgets per network and for all anonymous use; most calls cost 1–3 units and a call answered from cache usually costs 1. Over-quota calls return a `RATE_LIMITED` error with `retry_after_seconds`. Running locally via `npx -y edgar-entity-mcp` has no quota. Higher limits on the hosted endpoint may be requested by a person via the [GitHub issue form](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml) (reviewed manually, may be declined; please do not file automatically).
+The hosted endpoint is a free beta with low limits. Anonymous clients get **up to 60 units per day per IP (shared networks may get less) and 30 per minute**, within shared daily budgets per network and for all anonymous use; most calls cost 1–3 units and a call answered from cache usually costs 1. Over-quota calls return a `RATE_LIMITED` error with `retry_after_seconds`. Running the server locally from source over stdio has no quota. Higher limits on the hosted endpoint may be requested by a person via the [GitHub issue form](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml) (reviewed manually, may be declined; please do not file automatically).
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 
@@ -249,7 +260,7 @@ src/
   states/    registry (per-state dataset config + normalizers), socrata (SoQL builder, spelling variants, ranking, pagination)
   tools.ts   zod schemas + tool handlers (transport-agnostic)
   server.ts  registers tools/prompt/resource on an McpServer (shared by both transports)
-  stdio.ts   npm bin  → serveStdio()
+  stdio.ts   stdio entry point (node dist/stdio.js) → serveStdio()
   http/      handler.ts (mcp-handler + auth/quotas) · node-server.ts (local/self-host)
 api/mcp.ts   Vercel Function
 ```

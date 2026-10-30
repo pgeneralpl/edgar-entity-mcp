@@ -4,6 +4,7 @@
   "description": "MCP server for US company research: SEC EDGAR filings, XBRL financials, insider trades (Form 4) and state Secretary of State business-entity registries (NY, CO, OR, CT, PA).",
   "type": "module",
   "license": "MIT",
+  "private": true,
   "author": "pgeneralpl (https://github.com/pgeneralpl)",
   "mcpName": "io.github.pgeneralpl/edgar-entity-mcp",
   "keywords": [
@@ -66,7 +67,6 @@
     "smoke:e2e": "npm run build && tsx scripts/smoke.ts && tsx scripts/e2e-http.ts && tsx scripts/e2e-vercel-fn.ts",
     "check": "npm run typecheck && npm run lint && npm test",
     "check:stats-redis": "tsx scripts/stats-redis-check.ts",
-    "prepublishOnly": "npm run check && npm run build",
     "validate:registry": "tsx scripts/validate-server-json.ts",
     "gen": "tsx scripts/gen-artifacts.ts",
     "smoke:remote": "tsx scripts/e2e-remote.ts"

@@ -370,13 +370,13 @@ export function rateLimitedError(p: Principal, d: QuotaDecision, cost: number): 
     return new ToolError(
       "RATE_LIMITED",
       `The shared daily budget for anonymous use of this server is spent (${d.limit} units across all anonymous clients), and this IP has used its ${c.quota.anonTricklePerDay}-unit fallback allowance. This call costs ${cost} unit(s).`,
-      `Retry after ${d.retryAfterSeconds}s (UTC midnight), or run the server locally with \`npx -y edgar-entity-mcp\`. ${higherLimitsHint(c.keyRequestUrl)}`,
+      `Retry after ${d.retryAfterSeconds}s (UTC midnight), or run the server locally from source (https://github.com/pgeneralpl/edgar-entity-mcp). ${higherLimitsHint(c.keyRequestUrl)}`,
       { retry_after_seconds: d.retryAfterSeconds, scope: d.scope, limit: d.limit, cost },
     );
   const hint =
     p.tier === "anon"
-      ? `Retry after ${d.retryAfterSeconds}s, or run the server locally with \`npx -y edgar-entity-mcp\` (no quota; set SEC_USER_AGENT to your own name + email). ${higherLimitsHint(c.keyRequestUrl)}`
-      : `Retry after ${d.retryAfterSeconds}s, or self-host with \`npx -y edgar-entity-mcp\`. ${higherLimitsHint(c.keyRequestUrl)}`;
+      ? `Retry after ${d.retryAfterSeconds}s, or run the server locally from source (https://github.com/pgeneralpl/edgar-entity-mcp) (no quota; set SEC_USER_AGENT to your own name + email). ${higherLimitsHint(c.keyRequestUrl)}`
+      : `Retry after ${d.retryAfterSeconds}s, or self-host from source (https://github.com/pgeneralpl/edgar-entity-mcp). ${higherLimitsHint(c.keyRequestUrl)}`;
   return new ToolError("RATE_LIMITED", `Rate limit reached: ${d.limit} units per ${per} for ${who}. This call costs ${cost} unit(s).`, hint, {
     retry_after_seconds: d.retryAfterSeconds,
     scope: d.scope,
