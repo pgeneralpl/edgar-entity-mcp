@@ -6,6 +6,7 @@ import { ToolError, logError } from "./errors.js";
 import { getRedis } from "./cache.js";
 import { markRedisDegraded, redisDegraded } from "./degraded.js";
 import { currentContext } from "./context.js";
+import { frameTagsFor } from "../sec/metricAliases.js";
 
 /**
  * Per-client quotas for the hosted HTTP endpoint, in "units" that approximate upstream cost
@@ -68,15 +69,21 @@ export function toolCost(tool: string, args: unknown): number {
       return 0;
     case "search_company":
     case "get_company_profile":
-    case "get_xbrl_concept":
       return 1;
+    case "get_xbrl_concept":
+      // companyconcept; an unknown / mis-cased tag falls back to companyfacts (large, cached) once
+      return 3;
     case "list_filings":
       // tickers + submissions + up to LIST_MAX_HISTORY_PAGES (4) older-history pages
       return a.date_from || a.date_to || num(a.offset, 0) > 0 ? 6 : 1;
     case "get_financials":
       return 2; // companyfacts is a large document
     case "compare_companies":
-      return 3; // frames responses cover every filer
+      // Realistic maximum, reserved up front: one frame request per tag tried (metric mode: ≤ 3
+      // fallback tags; tag mode: 1) plus 1 for resolving `companies` (tickers file). Frames are
+      // capped at 256 KiB in Redis, so cached reads stay within the same count. Settlement
+      // (settleQuota) still refunds what a call did not use, e.g. when a company filter stops early.
+      return (typeof a.metric === "string" ? Math.max(1, frameTagsFor(a.metric).length) : 1) + 1;
     case "get_filing_document":
       // url: document + up to 3 redirects; company+accession adds tickers, submissions and up to 4 history pages
       return a.url ? 4 : 10;

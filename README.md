@@ -26,9 +26,9 @@ npx -y edgar-entity-mcp        # stdio MCP server
 | `get_company_profile` | Name, tickers, exchanges, SIC + industry, state of incorporation, FYE, EIN, addresses, former names, latest 10-K/10-Q | `data.sec.gov/submissions` |
 | `list_filings` | Filings by form type + date range, with accession, dates, primary-document and index URLs; reads older history pages when needed | `data.sec.gov/submissions` |
 | `get_filing_document` | Primary document converted to clean text (tables kept as rows); 10-K/10-Q **item extraction** (1, 1A, 7, 7A, 8…); `max_chars`/`offset` paging | `www.sec.gov/Archives` |
-| `get_financials` | Normalized revenue, gross profit, operating income, net income, EPS (basic/diluted), assets, liabilities, equity, cash, long-term debt, operating cash flow, capex, FCF, shares outstanding; annual or quarterly; deduped by fiscal period; reports the **tag used** | XBRL `companyfacts` |
-| `get_xbrl_concept` | Full history of any XBRL concept/unit for one company | XBRL `companyconcept` |
-| `compare_companies` | One concept across all filers for a calendar period (rank or filter by tickers) | XBRL `frames` |
+| `get_financials` | Normalized revenue, gross profit, operating income, net income, EPS (basic/diluted), assets, liabilities, equity, cash, long-term debt, operating cash flow, capex, FCF, shares outstanding; annual or quarterly; deduped by **fiscal** period (`period_basis`, `fiscal_year_end`); reports the **tag used**; metric aliases (`sales`, `eps`, `fcf`, …); a `hint` when a company only has 10-Q (or only 10-K) data | XBRL `companyfacts` |
+| `get_xbrl_concept` | Full history of any XBRL concept/unit for one company; `duration` filter (annual / quarterly / ytd / instant); tag case corrected, `did_you_mean` for unknown tags | XBRL `companyconcept` |
+| `compare_companies` | One concept (`tag`) or **metric** (`revenue`, `net_income`, … with tag fallback; the tag used per row) across all filers for a **calendar** period; rank or filter by tickers; `fiscal_period_differs` flags off-calendar fiscal years | XBRL `frames` |
 | `get_insider_trades` | Form 4/4A parsed: reporter, role/title, code + plain meaning, shares, price, value, A/D, owned after, derivative details; buy/sell summary | Form 4 XML |
 | `lookup_business_entity` | Search SoS registries by name or entity id; normalized status, type, formation date, jurisdiction, addresses, registered agent | NY/CO/OR/CT/PA open data (Socrata) |
 | `list_supported_states` | Coverage, dataset ids, update cadence and license per state | — |
@@ -78,7 +78,18 @@ Every tool takes `company` as a ticker (`AAPL`), CIK (`320193`) or unambiguous n
  {"rank":23,"cik":"0001318605","name":"Tesla, Inc.","val":96773000000,"end":"2023-12-31"}],
  "source_url":"https://data.sec.gov/api/xbrl/frames/us-gaap/Revenues/USD/CY2023.json"}
 ```
-Balance-sheet (instant) concepts need an `I` suffix, e.g. `{"tag":"Assets","period":"CY2024Q4I"}`.
+Balance-sheet (instant) concepts need an `I` suffix, e.g. `{"tag":"Assets","period":"CY2024Q4I"}` (with `metric` the suffix is added for you: `{"metric":"total_assets","period":"CY2024"}` reads `CY2024Q4I`).
+
+**`compare_companies`** by metric `{"metric":"revenue","period":"CY2023","companies":["MSFT","AMZN","F"]}`: many filers (MSFT, AMZN, AAPL) report revenue as `RevenueFromContractWithCustomerExcludingAssessedTax`, not `Revenues`, so `metric` tries up to 3 tags per company (`Revenues`, then `RevenueFromContract…`, then `SalesRevenueNet` for periods ≤ 2018) and reports the tag used:
+```json
+{"metric":"revenue","period":"CY2023","period_basis":"calendar","results":[
+ {"rank":1,"cik":"0001018724","name":"AMAZON.COM, INC.","val":574785000000,"start":"2023-01-01","end":"2023-12-31","tag":"us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"},
+ {"rank":2,"cik":"0000789019","name":"MICROSOFT CORPORATION","val":211915000000,"start":"2022-07-01","end":"2023-06-30","tag":"us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax","fiscal_period_differs":true},
+ {"rank":3,"cik":"0000037996","name":"Ford Motor Co","val":176191000000,"start":"2023-01-01","end":"2023-12-31","tag":"us-gaap:Revenues"}],
+ "tags_tried":["us-gaap:Revenues","us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax"],"notes":["…"]}
+```
+
+**Fiscal vs calendar periods.** `get_financials` and `get_xbrl_concept` report *fiscal* periods as filed (`fy`/`fp`; Apple's FY2025 ended 2025-09-27). `compare_companies` uses SEC *calendar* frames: `CY2023` holds, for each filer, the ~365-day period that best fits calendar 2023 (Microsoft's FY ending 2023-06-30). Rows whose period is more than 14 days off the calendar period get `fiscal_period_differs: true`; for a company's own fiscal years use `get_financials`. `accn` in a frame row is the latest filing that reported the value (often the next year's 10-K), not necessarily the original filing.
 
 **`lookup_business_entity`** `{"name":"Newmont Corporation","states":["CO"]}`
 ```json

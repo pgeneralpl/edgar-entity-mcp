@@ -14,9 +14,9 @@
 - get_company_profile: EDGAR company profile (SIC/industry, addresses, fiscal year end, former names, latest 10-K/10-Q).
 - list_filings: list a company's SEC filings, filterable by form type (10-K, 10-Q, 8-K, ...) and date range.
 - get_filing_document: read the text of a filing document, with 10-K/10-Q item extraction and length-limited paging.
-- get_financials: key financial metrics normalized from XBRL, one row per fiscal period, including derived free cash flow and the XBRL tag used.
-- get_xbrl_concept: history of a single XBRL concept for one company.
-- compare_companies: compare companies on one metric for a given period (XBRL frames).
+- get_financials: key financial metrics normalized from XBRL, one row per fiscal period, including derived free cash flow and the XBRL tag used; accepts aliases such as sales or eps.
+- get_xbrl_concept: history of a single XBRL concept for one company, filterable by duration (annual, quarterly, year-to-date, instant).
+- compare_companies: compare companies on one metric (e.g. revenue, with fallback across XBRL tags) or one XBRL tag for a calendar period (XBRL frames).
 - get_insider_trades: Form 4 insider transactions with insider role and plain-English meaning of transaction codes.
 - lookup_business_entity: search Secretary of State registries (official open data) by entity name or id.
 - list_supported_states: supported states, coverage caveats and data license terms.

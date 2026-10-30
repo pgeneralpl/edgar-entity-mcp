@@ -88,7 +88,7 @@ describe("C1: cost-weighted quotas", () => {
     expect(toolCost("lookup_business_entity", {})).toBe(5);
     expect(toolCost("lookup_business_entity", { states: ["CO", "CO", "NY"] })).toBe(2);
     expect(toolCost("get_filing_document", { url: "x" })).toBe(4);
-    expect(toolCost("compare_companies", {})).toBe(3);
+    expect(toolCost("compare_companies", {})).toBe(2);
   });
   it("exhausts the per-minute and per-day budgets with retry-after and a key hint", async () => {
     let now = Date.UTC(2026, 9, 20, 12, 0, 10);
