@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Research a US company with SEC EDGAR in Claude or Cursor (MCP)</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Step-by-step: connect a free, open-source MCP server to Claude or Cursor and pull SEC filings, XBRL financials, Form 4 trades and state registry records.">
+<link rel="canonical" href="https://edgar-entity-mcp.vercel.app/guides/sec-edgar-mcp">
+<style>
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:720px;margin:40px auto;padding:0 16px;line-height:1.55;color:#1a1a1a;background:#fff}
+h1{line-height:1.25}h2{margin-top:2em;line-height:1.3}h3{margin-top:1.5em}
+a{color:#0645ad}a:focus-visible{outline:2px solid #0645ad;outline-offset:2px}
+code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em;background:#f3f3f3;padding:.1em .3em;border-radius:3px;overflow-wrap:anywhere}
+pre{background:#f3f3f3;padding:12px;border-radius:6px;overflow-x:auto;line-height:1.4}pre code{background:none;padding:0;overflow-wrap:normal}
+blockquote{margin:1em 0;padding:.5em 1em;border-left:4px solid #ccc;background:#fafafa}
+.table-wrap{overflow-x:auto}table{border-collapse:collapse}th,td{border:1px solid #ccc;padding:6px 10px;text-align:left;vertical-align:top}
+hr{border:0;border-top:1px solid #ddd;margin:2em 0}
+nav,footer{font-size:.875em}
+@media (prefers-color-scheme:dark){body{background:#121212;color:#e6e6e6}a{color:#8ab4f8}a:focus-visible{outline-color:#8ab4f8}code,pre{background:#1e1e1e}blockquote{background:#1a1a1a;border-color:#555}th,td{border-color:#555}hr{border-color:#333}}
+</style>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "TechArticle",
+      "@id": "https://edgar-entity-mcp.vercel.app/guides/sec-edgar-mcp#article",
+      "headline": "How to research a US company with SEC EDGAR in Claude or Cursor using MCP",
+      "description": "Connect the free, open-source edgar-entity-mcp server to Claude or Cursor to pull SEC filings, XBRL financials, Form 4 insider transactions and state business-registry records, with source URLs.",
+      "datePublished": "2026-10-29",
+      "dateModified": "2026-10-29",
+      "inLanguage": "en",
+      "about": [
+        {
+          "@type": "Thing",
+          "name": "SEC EDGAR"
+        },
+        {
+          "@type": "Thing",
+          "name": "Model Context Protocol"
+        },
+        {
+          "@type": "Thing",
+          "name": "XBRL"
+        }
+      ],
+      "proficiencyLevel": "Beginner",
+      "mainEntityOfPage": "https://edgar-entity-mcp.vercel.app/guides/sec-edgar-mcp"
+    },
+    {
+      "@type": "HowTo",
+      "name": "Research a US company with SEC EDGAR via MCP",
+      "totalTime": "PT10M",
+      "tool": [
+        {
+          "@type": "HowToTool",
+          "name": "An MCP client such as Claude Desktop or Cursor"
+        }
+      ],
+      "step": [
+        {
+          "@type": "HowToStep",
+          "name": "Connect the server",
+          "text": "Add https://edgar-entity-mcp.vercel.app/mcp (remote) or npx -y edgar-entity-mcp (stdio, with SEC_USER_AGENT) to your MCP client config."
+        },
+        {
+          "@type": "HowToStep",
+          "name": "Find the company",
+          "text": "Use search_company to map a ticker or name to its SEC CIK."
+        },
+        {
+          "@type": "HowToStep",
+          "name": "Review profile and filings",
+          "text": "Use get_company_profile and list_filings to see industry, fiscal year end and recent 10-K, 10-Q and 8-K filings."
+        },
+        {
+          "@type": "HowToStep",
+          "name": "Read filing sections",
+          "text": "Use get_filing_document with a section such as 1A (Risk Factors) or 7 (MD&A)."
+        },
+        {
+          "@type": "HowToStep",
+          "name": "Pull financials",
+          "text": "Use get_financials for normalized XBRL metrics with the tags used, or get_xbrl_concept for one concept's history."
+        },
+        {
+          "@type": "HowToStep",
+          "name": "Compare and check insiders",
+          "text": "Use compare_companies for one metric across companies and get_insider_trades for Form 4 transactions explained in plain English."
+        },
+        {
+          "@type": "HowToStep",
+          "name": "Check state registration",
+          "text": "Use lookup_business_entity for NY, CO, OR, CT or PA Secretary of State open-data records."
+        }
+      ]
+    },
+    {
+      "@type": "SoftwareApplication",
+      "name": "edgar-entity-mcp",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Any (Node.js) / hosted",
+      "license": "https://opensource.org/licenses/MIT",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD",
+        "description": "Free beta with low limits"
+      },
+      "codeRepository": "https://github.com/pgeneralpl/edgar-entity-mcp",
+      "url": "https://edgar-entity-mcp.vercel.app/"
+    },
+    {
+      "@type": "FAQPage",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Is edgar-entity-mcp free?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "Yes. The hosted endpoint is a free beta with low daily limits and no signup or API key; the code is MIT-licensed."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Do I need an SEC API key?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. SEC EDGAR APIs are public. When running locally, set SEC_USER_AGENT to your name and email per the SEC fair-access policy."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Which states are covered?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "New York, Colorado, Oregon, Connecticut and Pennsylvania. NY, OR and PA include active entities only. Delaware and other states are not covered."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is it affiliated with the SEC?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. It is an independent open-source project that reads public data and is not affiliated with or endorsed by the SEC or any state agency."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Can it be used for background or credit checks?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. It is not a consumer reporting agency and must not be used for FCRA purposes."
+          }
+        },
+        {
+          "@type": "Question",
+          "name": "Is this investment, legal or financial advice?",
+          "acceptedAnswer": {
+            "@type": "Answer",
+            "text": "No. It is not investment, legal or financial advice. It returns public filings and registry data with source links; verify figures in the original filing."
+          }
+        }
+      ]
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<nav aria-label="Site"><a href="/">edgar-entity-mcp</a> · <a href="/terms">Beta terms</a> · <a href="/privacy">Privacy</a> · <a href="/abuse">Contact &amp; Abuse</a></nav>
+<main>
+<article>
+<h1>How to research a US company with SEC EDGAR in Claude or Cursor using MCP</h1>
+<p><em>Written by the maintainer of edgar-entity-mcp (disclosure: this guide is about the maintainer's own open-source project). Last updated: 2026-10-29.</em></p>
+<p><strong>TL;DR:</strong> Add one MCP server, <code>edgar-entity-mcp</code>, to Claude Desktop, Claude Code, Cursor or VS Code. Your AI assistant can then look up a company in <strong>SEC EDGAR</strong>: filings, 10-K sections, XBRL financials, Form 4 insider transactions and peer comparisons. It can also check <strong>state Secretary of State business registries</strong> (NY, CO, OR, CT, PA). Every answer includes source URLs so you can check it. The hosted endpoint is a <strong>free beta with low limits and no API key</strong>, and the code is MIT-licensed.</p>
+<blockquote>
+<p>Not investment, legal or financial advice. edgar-entity-mcp is not affiliated with or endorsed by the SEC or any state agency, is not a consumer reporting agency, and must not be used for FCRA purposes (credit, employment, insurance or tenant screening). State data covers only the listed states and datasets and may be incomplete or delayed.</p>
+</blockquote>
+<hr>
+<h2>What you'll be able to ask</h2>
+<ul>
+<li>"Find Apple's CIK and show its latest 10-K."</li>
+<li>"Summarize the Risk Factors (Item 1A) of Apple's latest 10-K."</li>
+<li>"Show Apple's revenue, net income and free cash flow for the last fiscal year, with the XBRL tags used."</li>
+<li>"Compare Ford, GM and Tesla on revenue for calendar year 2023."</li>
+<li>"List the last five Form 4 filings for Tesla and explain the transaction codes."</li>
+<li>"Is Newmont Corporation registered in Colorado? What is its status and registered agent?"</li>
+</ul>
+<h2>What you need</h2>
+<ul>
+<li>An MCP-capable client: Claude Desktop, Claude Code, Cursor, Windsurf or VS Code (all listed in the project README).</li>
+<li><strong>Either</strong> nothing else, for the hosted remote endpoint, <strong>or</strong> Node.js to run the npm package locally over stdio. Use a current, patched Node.js: 22.23.4+ (22.x) or 24.22.1+ (24.x). The published npm version 0.1.0 declares <code>node &gt;=20</code>, but Node.js 20 is end-of-life and lacks the October 2026 security fixes. From 0.2.0 (not yet published) the package declares <code>24.x</code> (npm prints a harmless <code>EBADENGINE</code> notice on 22.x) and warns on startup when Node.js is unpatched.</li>
+</ul>
+<h2>Step 1: Connect the server</h2>
+<h3>Option A: Hosted endpoint (no install, no key)</h3>
+<p>Add this to your client's MCP config:</p>
+<pre><code>{ &quot;mcpServers&quot;: { &quot;edgar-entity&quot;: { &quot;url&quot;: &quot;https://edgar-entity-mcp.vercel.app/mcp&quot; } } }
+</code></pre>
+<p>If your client only speaks stdio, use the <code>mcp-remote</code> bridge:</p>
+<pre><code>{ &quot;mcpServers&quot;: { &quot;edgar-entity&quot;: { &quot;command&quot;: &quot;npx&quot;, &quot;args&quot;: [&quot;-y&quot;, &quot;mcp-remote&quot;, &quot;https://edgar-entity-mcp.vercel.app/mcp&quot;] } } }
+</code></pre>
+<h3>Option B: Local (stdio via npx)</h3>
+<pre><code>{
+  &quot;mcpServers&quot;: {
+    &quot;edgar-entity&quot;: {
+      &quot;command&quot;: &quot;npx&quot;,
+      &quot;args&quot;: [&quot;-y&quot;, &quot;edgar-entity-mcp&quot;],
+      &quot;env&quot;: { &quot;SEC_USER_AGENT&quot;: &quot;Your Name you@example.com&quot; }
+    }
+  }
+}
+</code></pre>
+<p>The SEC's fair-access policy asks automated clients to identify themselves, so set <code>SEC_USER_AGENT</code> to your name and a contact email.</p>
+<p>Where the config lives:</p>
+<ul>
+<li><strong>Claude Desktop:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> (macOS) or <code>%APPDATA%\Claude\claude_desktop_config.json</code> (Windows).</li>
+<li><strong>Cursor:</strong> <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project).</li>
+<li><strong>Claude Code:</strong> <code>claude mcp add edgar-entity -e SEC_USER_AGENT="Your Name you@example.com" -- npx -y edgar-entity-mcp</code></li>
+<li><strong>VS Code:</strong> <code>.vscode/mcp.json</code>, using <code>"servers"</code> instead of <code>"mcpServers"</code>.</li>
+</ul>
+<p>Restart the client. You should see 10 tools from <code>edgar-entity</code>.</p>
+<h2>Step 2: Find the company (ticker → CIK)</h2>
+<p>EDGAR identifies filers by <strong>CIK</strong> (Central Index Key). Ask: <em>"Search EDGAR for Berkshire."</em> The assistant calls <code>search_company</code>:</p>
+<p><code>search_company {"query":"berkshire"}</code> → <code>BERKSHIRE HATHAWAY INC</code>, CIK <code>0001067983</code>, tickers <code>BRK-B, BRK-A</code>.</p>
+<p>All other tools accept a ticker (<code>AAPL</code>), a CIK (<code>320193</code>) or an unambiguous name. If a name is ambiguous, the server returns candidate CIKs.</p>
+<h2>Step 3: Get the profile and filings</h2>
+<ul>
+<li><code>get_company_profile</code> returns name, tickers, exchanges, SIC code and industry, state of incorporation, fiscal year end, addresses, former names, and the latest 10-K/10-Q.</li>
+<li><code>list_filings</code> filters by form type (10-K, 10-Q, 8-K…) and date range, and returns accession numbers and document URLs. Example: <code>{"company":"AAPL","forms":["10-K"],"date_to":"2010-12-31","limit":2}</code> returns the 2010 10-K and 10-K/A.</li>
+</ul>
+<h2>Step 4: Read the parts of a filing that matter</h2>
+<p><code>get_filing_document</code> converts the primary document to clean text and can extract 10-K/10-Q <strong>items</strong>: 1 (Business), 1A (Risk Factors), 7 (MD&amp;A), 7A, 8 and so on. Long text is paged with <code>max_chars</code> and <code>offset</code>.</p>
+<pre><code>{&quot;url&quot;:&quot;https://www.sec.gov/Archives/edgar/data/320193/000032019325000079/aapl-20250927.htm&quot;,&quot;section&quot;:&quot;1A&quot;,&quot;max_chars&quot;:3000}
+</code></pre>
+<p>Prompt idea: <em>"Read Item 1A of Apple's latest 10-K and list the five risks that are new or changed compared to the prior year, quoting the filing."</em></p>
+<p>Tip: filing text is written by the filer and is treated as <strong>untrusted data</strong>. The hosted server wraps it in explicit markers so that well-behaved agents don't follow instructions hidden inside documents.</p>
+<h2>Step 5: Pull normalized financials (with the XBRL tags used)</h2>
+<p><code>get_financials {"company":"AAPL","limit":1}</code> returns one row per fiscal period: revenue, gross profit, operating income, net income, EPS, assets, liabilities, equity, cash, long-term debt, operating cash flow, capex, <strong>derived free cash flow</strong> and shares outstanding. It also returns <code>tags_used</code>, so you can see which XBRL concept each number came from. A trimmed excerpt from the README:</p>
+<pre><code>{&quot;name&quot;:&quot;Apple Inc.&quot;,&quot;period_type&quot;:&quot;annual&quot;,
+ &quot;periods&quot;:[{&quot;fy&quot;:2025,&quot;form&quot;:&quot;10-K&quot;,&quot;filed&quot;:&quot;2025-10-31&quot;,&quot;revenue&quot;:416161000000,&quot;net_income&quot;:112010000000,
+   &quot;operating_cash_flow&quot;:111482000000,&quot;capex&quot;:12715000000,&quot;free_cash_flow&quot;:98767000000}],
+ &quot;tags_used&quot;:{&quot;revenue&quot;:[&quot;us-gaap:RevenueFromContractWithCustomerExcludingAssessedTax&quot;]},
+ &quot;source_url&quot;:&quot;https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json&quot;}
+</code></pre>
+<p>Here free cash flow is operating cash flow minus capex (111,482M − 12,715M = 98,767M). Use <code>period_type:"quarterly"</code> for 3-month values. When quarters have to be derived (for example Q4 = FY − 9M), the response says so in <code>notes</code>.</p>
+<p>Need one specific line item over time? <code>get_xbrl_concept {"company":"TSLA","tag":"ResearchAndDevelopmentExpense","forms":["10-K"]}</code>.</p>
+<h2>Step 6: Compare companies on one metric</h2>
+<p><code>compare_companies</code> uses SEC XBRL "frames" (one concept across all filers for one period):</p>
+<pre><code>{&quot;tag&quot;:&quot;Revenues&quot;,&quot;period&quot;:&quot;CY2023&quot;,&quot;companies&quot;:[&quot;TSLA&quot;,&quot;F&quot;,&quot;GM&quot;]}
+</code></pre>
+<p>Per the README sample output: Ford $176.19B, GM $171.84B and Tesla $96.77B for CY2023, each with its rank among the 2,679 companies reporting that tag. Balance-sheet (point-in-time) concepts need an <code>I</code> suffix, e.g. <code>CY2024Q4I</code>.</p>
+<p>Caveat: companies don't always use the same tag (for example <code>Revenues</code> vs <code>RevenueFromContractWithCustomer…</code>). Check <code>tags_used</code> before you draw conclusions.</p>
+<h2>Step 7: Insider transactions (Form 4), in plain English</h2>
+<p><code>get_insider_trades {"company":"TSLA","limit":5}</code> parses Form 4/4A filings and returns the reporter, their role or title, the transaction code <strong>with its plain-English meaning</strong> (e.g. <code>S</code> = open market or private sale, <code>M</code> = exercise or conversion of a derivative, <code>F</code> = shares withheld for exercise price or taxes), shares, price, value, holdings after the transaction, and a buy/sell summary, each with a link to the filing.</p>
+<p>Insider transactions have many routine explanations, such as tax withholding, planned sales and option exercises. Treat them as facts to read, not signals to trade on.</p>
+<h2>Step 8: Check a private or state-registered entity (Secretary of State)</h2>
+<p>Many companies, including LLCs and private suppliers, never file with the SEC. <code>lookup_business_entity</code> searches official state open-data registries <strong>by name or entity ID</strong>:</p>
+<pre><code>{&quot;name&quot;:&quot;Newmont Corporation&quot;,&quot;states&quot;:[&quot;CO&quot;]}
+</code></pre>
+<p>returns status ("Good Standing"), type, formation date, jurisdiction of formation (DE), principal address, registered agent (when it is a company), and links to the state record.</p>
+<p>Coverage (call <code>list_supported_states</code> for the current details and licenses):</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>State</th>
+<th>Records</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>New York, Oregon, Pennsylvania</td>
+<td>active entities only</td>
+</tr>
+<tr>
+<td>Colorado, Connecticut</td>
+<td>include dissolved / inactive entities</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Not covered:</strong> every other state, including Delaware, California, Florida and Texas. "Not found" therefore does <strong>not</strong> mean that an entity doesn't exist. The hosted endpoint does not return the names or addresses of registered agents who are individuals. npm 0.1.0 does not filter these fields; use 0.2.0 or later.</p>
+<h2>A complete research prompt</h2>
+<blockquote>
+<p>"Research Newmont Corporation: find its CIK and industry, summarize the latest 10-K's business description in five bullets, show the last three fiscal years of revenue, net income and free cash flow with the XBRL tags used, list any Form 4 filings from the last 90 days with what each code means, and check its Colorado registration. Cite a source URL for every fact."</p>
+</blockquote>
+<p>The server also ships a <code>company_research_brief</code> <strong>prompt</strong> that runs a similar workflow.</p>
+<h2>Limits (free beta)</h2>
+<p>The hosted endpoint is a <strong>free beta with low limits</strong>, intended for interactive research, not bulk downloads.</p>
+<ul>
+<li>Usage is measured in units; a cached call usually costs 1 unit.</li>
+<li>Currently about <strong>60 units per day per IP or network and 30 per minute</strong>; limits may change without notice.</li>
+<li>Heavier tools cost more units (for example, Form 4 lookups and full documents).</li>
+<li>If you need more, run it locally over stdio with <code>npx -y edgar-entity-mcp</code> and set <code>SEC_USER_AGENT</code> to your own name and email. Local stdio use has no unit quotas (in both npm 0.1.0 and 0.2.0); self-hosted HTTP mode (<code>npm run start:http</code>, from 0.2.0) enforces quotas like the hosted endpoint. The local server still has to respect the SEC's fair-access limit (10 requests per second), so it throttles its SEC requests to 8 per second by default in 0.1.0 and 6 per second in 0.2.0 (<code>SEC_MAX_RPS</code>).</li>
+</ul>
+<h2>FAQ</h2>
+<p><strong>Is this free?</strong>
+Yes. The hosted endpoint is a free beta with low daily limits and no signup or API key, and the code is open source under the MIT license.</p>
+<p><strong>Do I need an SEC API key?</strong>
+No. SEC EDGAR's APIs are public. If you run the server locally, set <code>SEC_USER_AGENT</code> to your name and email, as the SEC's fair-access policy asks.</p>
+<p><strong>Which AI clients work?</strong>
+Any MCP client. The README documents Claude Desktop, Claude Code, Cursor, Windsurf and VS Code, plus a remote Streamable HTTP endpoint and an <code>mcp-remote</code> fallback for stdio-only clients.</p>
+<p><strong>What data sources does it use?</strong>
+SEC EDGAR (<code>data.sec.gov</code> submissions, XBRL companyfacts, companyconcept and frames, plus <code>www.sec.gov/Archives</code> documents and Form 4 XML) and the official open-data (Socrata) business registries of New York, Colorado, Oregon, Connecticut and Pennsylvania.</p>
+<p><strong>Is it affiliated with the SEC or a state?</strong>
+No. It is an independent open-source project that reads public data. It is not affiliated with or endorsed by the SEC or any state agency.</p>
+<p><strong>Does it cover Delaware?</strong>
+No. Only NY, CO, OR, CT and PA are covered right now, and NY/OR/PA include active entities only.</p>
+<p><strong>Can I use it for background checks, credit, employment or tenant screening?</strong>
+No. It is not a consumer reporting agency, and it must not be used for any FCRA purpose.</p>
+<p><strong>Is this investment, legal or financial advice?</strong>
+No. It is not investment, legal or financial advice. It returns public filings and registry data with links to the source. Always verify the figures in the original filing.</p>
+<p><strong>How fresh is the data?</strong>
+EDGAR data is fetched from the SEC with short caches (about 10 minutes for filing lists, a few hours for XBRL facts). State datasets update on each state's own schedule, which <code>list_supported_states</code> reports.</p>
+<p><strong>Can I self-host it?</strong>
+Yes. <code>npm run build &amp;&amp; npm run start:http</code> runs the HTTP server locally, and the repo includes a Vercel deployment config. Self-hosted HTTP mode (from 0.2.0) enforces per-IP quotas like the hosted endpoint (defaults adjustable with the <code>QUOTA_*</code> environment variables); only local stdio use has no quotas. Set <code>SEC_USER_AGENT</code> to your own name and email.</p>
+<h2>Links</h2>
+<ul>
+<li>Source (MIT): <a href="https://github.com/pgeneralpl/edgar-entity-mcp" rel="noopener">https://github.com/pgeneralpl/edgar-entity-mcp</a></li>
+<li>npm: <a href="https://www.npmjs.com/package/edgar-entity-mcp" rel="noopener">https://www.npmjs.com/package/edgar-entity-mcp</a></li>
+<li>Hosted endpoint: <a href="https://edgar-entity-mcp.vercel.app/mcp" rel="noopener">https://edgar-entity-mcp.vercel.app/mcp</a></li>
+<li>MCP Registry: <code>io.github.pgeneralpl/edgar-entity-mcp</code></li>
+<li>Privacy · Beta terms · Abuse contact: <a href="/privacy">https://edgar-entity-mcp.vercel.app/privacy</a> · <a href="/terms">/terms</a> · <a href="/abuse">/abuse</a></li>
+<li>Contact: <a href="mailto:patryk.general@mail.grokbot.com">patryk.general@mail.grokbot.com</a></li>
+</ul>
+</article>
+</main>
+<footer><p><a href="https://github.com/pgeneralpl/edgar-entity-mcp" rel="noopener">Source on GitHub</a> · MIT · <a href="/terms">Beta terms</a> · <a href="/privacy">Privacy</a> · <a href="/abuse">Contact &amp; Abuse</a></p></footer>
+</body></html>

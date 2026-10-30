@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadConfig, resetConfig } from "../src/config.js";
+import { HIGHER_LIMITS_ISSUE_URL, loadConfig, resetConfig } from "../src/config.js";
 import { MemoryCache, setCache } from "../src/core/cache.js";
 import { fetchRaw, readCapped, resetLimiters, validateFilingDocUrl } from "../src/core/http.js";
 import { RateLimiter } from "../src/core/rateLimiter.js";
@@ -103,7 +103,8 @@ describe("C1: cost-weighted quotas", () => {
     expect(e).toBeInstanceOf(ToolError);
     expect(e!.code).toBe("RATE_LIMITED");
     expect(e!.details).toMatchObject({ scope: "minute", limit: 10, retry_after_seconds: 50 });
-    expect(e!.hint).toMatch(/free API key/);
+    expect(e!.hint).toContain(HIGHER_LIMITS_ISSUE_URL);
+    expect(e!.hint).not.toMatch(/free (API )?key/i);
     now += 60_000; // next minute: daily budget (15) still applies
     vi.setSystemTime(now);
     await chargeQuota(p, "lookup_business_entity", {}, store); // 15
@@ -308,6 +309,7 @@ describe("M3/M4/L1: health gating, host checks, generic errors", () => {
       expect(text).not.toContain(process.version);
     }
     expect(JSON.stringify(healthPayload({} as NodeJS.ProcessEnv))).not.toMatch(/node_runtime_patched|node_version/);
+    expect(JSON.stringify(healthPayload({} as NodeJS.ProcessEnv))).not.toMatch(/minute_limits|per instance/);
   });
   it("node-server host/origin allowlists", () => {
     const hosts = ["localhost", "127.0.0.1", "[::1]"];

@@ -166,7 +166,7 @@ export async function fetchRaw(url: string, source: Source, opts: FetchOptions =
     throw new ToolError(
       "RATE_LIMITED",
       "The hosted server is in degraded mode (its shared rate-limit store is unavailable), so anonymous requests are answered from cache only, and this data is not cached.",
-      `Retry in a few minutes, use an API key (${config().keyRequestUrl}), or run the server locally with \`npx -y edgar-entity-mcp\`.`,
+      "Retry in a few minutes, or run the server locally with `npx -y edgar-entity-mcp`.",
       { retry_after_seconds: 120, scope: "degraded" },
     );
   return clientSlots().run(ctx?.transport === "http" ? ctx.principal?.id : undefined, () => fetchRawInner(url, source, opts, ctx?.principal?.tier ?? "anon"));

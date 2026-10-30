@@ -1,0 +1,35 @@
+name: Higher limits request
+description: Ask for higher limits on the hosted endpoint (edgar-entity-mcp.vercel.app).
+title: "Higher limits request: "
+labels: ["higher-limits"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a free, non-commercial hobby project. Requests are reviewed manually, may be declined, and no higher limit, uptime or support is promised. There are no paid plans.
+
+        **This issue is public. Do not include personal data or secrets**: no names, emails, phone numbers, company names, API keys, tokens or IP addresses. We will never post an API key in an issue. If we can help, we will say in the issue how to receive one privately.
+
+        Please file this yourself; do not let an AI agent file it automatically.
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Briefly, what kind of use (e.g. research, a personal project). No company or personal names needed.
+      placeholder: e.g. personal research tool comparing 10-K financials
+    validations:
+      required: true
+  - type: input
+    id: calls_per_day
+    attributes:
+      label: Approximate calls per day
+      placeholder: e.g. 500
+    validations:
+      required: true
+  - type: input
+    id: client
+    attributes:
+      label: Client / agent used (optional)
+      placeholder: e.g. Claude Desktop, Cursor, custom agent
+    validations:
+      required: false
