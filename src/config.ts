@@ -60,6 +60,14 @@ export interface Config {
   maxBodyBytes: number;
   maxDocumentBytes: number;
   suppressionFile?: string;
+  /**
+   * Natural-person registered-agent details (include_agent_details) on the HTTP transport. Off unless
+   * ALLOW_PERSON_AGENT_DETAILS=1/true on a self-hosted server; always off on Vercel (the hosted endpoint),
+   * whatever the variable says. stdio (local) use is unaffected.
+   */
+  allowPersonAgentDetails: boolean;
+  /** Running on Vercel (the hosted endpoint, including previews). */
+  onVercel: boolean;
 }
 
 /** GitHub issue form for higher-limit requests; the single link shown in RATE_LIMITED / 401 hints. */
@@ -95,6 +103,11 @@ export function isValidSecUserAgent(ua: string | undefined): boolean {
   if (!ua) return false;
   if (/contact@example\.com/i.test(ua)) return false;
   return /[^\s@]+@[^\s@]+\.[^\s@]+/.test(ua);
+}
+
+/** Hosted on Vercel when any of VERCEL, VERCEL_ENV or VERCEL_REGION is set (fail closed for privacy). */
+export function isVercelEnv(env: NodeJS.ProcessEnv): boolean {
+  return [env.VERCEL, env.VERCEL_ENV, env.VERCEL_REGION].some((v) => !!v?.trim());
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -150,6 +163,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxBodyBytes: num(env.MAX_BODY_BYTES, 64 * 1024),
     maxDocumentBytes: num(env.MAX_DOCUMENT_BYTES, 15 * 1024 * 1024),
     suppressionFile: env.SUPPRESSION_FILE?.trim() || undefined,
+    allowPersonAgentDetails: /^(1|true)$/i.test(env.ALLOW_PERSON_AGENT_DETAILS?.trim() ?? "") && !isVercelEnv(env),
+    onVercel: isVercelEnv(env),
   };
 }
 

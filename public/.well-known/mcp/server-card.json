@@ -407,7 +407,7 @@
     {
       "name": "lookup_business_entity",
       "title": "State business-entity registry lookup",
-      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (individual agents withheld unless include_agent_details=true), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.",
+      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are withheld on the hosted endpoint; automated classification), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -462,7 +462,7 @@
           },
           "include_agent_details": {
             "default": false,
-            "description": "Include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Requires an API key on the hosted server. Default false: only organizational agents are shown.",
+            "description": "Local/self-hosted use only: include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Ignored on the hosted endpoint, which always withholds them. Default false: only organizational agents are shown.",
             "type": "boolean"
           }
         }
