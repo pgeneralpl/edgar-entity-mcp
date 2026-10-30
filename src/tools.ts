@@ -6,14 +6,26 @@ import { loadSuppression } from "./states/suppression.js";
 import { compact } from "./core/util.js";
 import { resolveCompany, searchCompanies } from "./sec/tickers.js";
 import { buildProfile, getSubmissions, listFilings, findFiling } from "./sec/submissions.js";
-import { extractSection, fetchDocumentText, listSections, normalizeSectionId, SECTION_TITLES } from "./sec/documents.js";
+import { extractSection, fetchDocumentText, listSections, normalizeSectionId, outlineSections, detectForm, sectionTitle } from "./sec/documents.js";
+import {
+  businessEntityOutput,
+  companyProfileOutput,
+  compareCompaniesOutput,
+  filingDocumentOutput,
+  financialsOutput,
+  insiderTradesOutput,
+  listFilingsOutput,
+  searchCompanyOutput,
+  supportedStatesOutput,
+  xbrlConceptOutput,
+} from "./outputSchemas.js";
 import { getFinancials, METRIC_KEYS } from "./sec/financials.js";
 import { CONCEPT_TAXONOMIES, DURATIONS, FRAME_TAXONOMIES, TAG_HINT, TAG_RE, getConcept, getFrame, getMetricFrame, normalizeFrameUnit, splitTag } from "./sec/xbrl.js";
 import { FRAME_METRIC_INPUTS, FRAME_METRIC_KEYS, METRIC_ALIASES, canonicalMetric } from "./sec/metricAliases.js";
 import { getInsiderTrades } from "./sec/insider.js";
 import { searchState, type MatchMode } from "./states/socrata.js";
 import { COLORADO_DISCLAIMER, STATE_SOURCES, SUPPORTED_STATES, UNSUPPORTED_NOTES } from "./states/registry.js";
-import { normalizeAccession } from "./core/util.js";
+import { filingIndexUrl, normalizeAccession } from "./core/util.js";
 
 const dateStr = z
   .string()
@@ -32,6 +44,8 @@ export interface ToolDef<S extends z.ZodObject = z.ZodObject> {
   title: string;
   description: string;
   inputSchema: S;
+  /** MCP outputSchema; when set, successful results are also returned as structuredContent. */
+  outputSchema?: z.ZodObject;
   run(args: z.infer<S>): Promise<unknown>;
 }
 
@@ -48,6 +62,7 @@ export const searchCompany = def({
     query: z.string().min(1).max(200).describe("Ticker or company name, e.g. 'MSFT', 'berkshire', 'Tesla Inc'"),
     limit: z.number().int().min(1).max(25).default(5),
   }),
+  outputSchema: searchCompanyOutput,
   async run({ query, limit }) {
     const matches = await searchCompanies(query, limit);
     return {
@@ -65,6 +80,7 @@ export const getCompanyProfile = def({
   description:
     "Company profile from SEC EDGAR submissions: legal name, tickers, exchanges, SIC code + industry, state of incorporation, fiscal year end, EIN, filer category, business/mailing addresses, former names, latest 10-K/10-Q. Use it to orient before deeper research.",
   inputSchema: z.object({ company: companyArg }),
+  outputSchema: companyProfileOutput,
   async run({ company }) {
     const c = await resolveCompany(company);
     return buildProfile(await getSubmissions(c.cik));
@@ -85,6 +101,7 @@ export const listFilingsTool = def({
     limit: z.number().int().min(1).max(100).default(20),
     offset: z.number().int().min(0).max(5000).default(0).describe("Skip this many matching filings (pagination)"),
   }),
+  outputSchema: listFilingsOutput,
   async run(a) {
     const c = await resolveCompany(a.company);
     const r = await listFilings(c.cik, { forms: a.forms, includeAmendments: a.include_amendments, dateFrom: a.date_from, dateTo: a.date_to }, a.limit, a.offset);
@@ -100,19 +117,24 @@ export const listFilingsTool = def({
   },
 });
 
+/** Default page size of get_filing_document text (characters). */
+export const DOC_DEFAULT_MAX_CHARS = 10_000;
+
 export const getFilingDocument = def({
   name: "get_filing_document",
   title: "Read a filing document",
   description:
-    "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
+    "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession` (one of the two is required). Start with mode 'outline' for a long 10-K/10-Q: it returns no text, only the detected items (id, title, offset, chars) and total_chars, so you can then read just what you need. Extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Text is paged: max_chars (default 10,000) per call, then pass the returned next_offset as offset (offsets are relative to the section when `section` is set, else to the whole document).",
   inputSchema: z.object({
-    url: z.string().url().max(500).optional().describe("Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings)"),
+    url: z.string().url().max(500).optional().describe("Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings). Either url, or company + accession, is required."),
     company: companyArg.optional(),
-    accession: z.string().max(30).optional().describe("Accession number, e.g. 0000320193-24-000123"),
+    accession: z.string().max(30).optional().describe("Accession number, e.g. 0000320193-24-000123 (with company)"),
+    mode: z.enum(["text", "outline"]).default("text").describe("'text' (default) returns a page of text; 'outline' returns only the item list with offsets and lengths (cheap way to plan reading a long filing)"),
     section: z.string().max(10).optional().describe("Item id to extract, e.g. '1A', '7', 'Item 7A'"),
-    max_chars: z.number().int().min(500).max(100_000).default(20_000),
-    offset: z.number().int().min(0).max(20_000_000).default(0),
+    max_chars: z.number().int().min(500).max(100_000).default(DOC_DEFAULT_MAX_CHARS).describe("Characters of text per call (500–100,000; default 10,000)"),
+    offset: z.number().int().min(0).max(20_000_000).default(0).describe("Start position (use next_offset, or an outline item's offset)"),
   }),
+  outputSchema: filingDocumentOutput,
   async run(a) {
     let url = a.url;
     let trusted = false;
@@ -125,11 +147,27 @@ export const getFilingDocument = def({
       if (!f || !f.url) throw new ToolError("NOT_FOUND", `Accession ${acc} not found for CIK ${c.cik}.`, "Use list_filings to get valid accession numbers.");
       url = f.url;
       trusted = true; // built from EDGAR metadata, not user input
-      meta = { form: f.form, filed: f.filed, report_date: f.report_date, accession: f.accession, index_url: f.index_url };
+      meta = { cik: c.cik, form: f.form, filed: f.filed, report_date: f.report_date, accession: f.accession, index_url: f.index_url };
     }
     const doc = await fetchDocumentText(url, { trusted });
     const { text, kind } = doc;
     url = doc.url;
+    // url mode: CIK, accession and index URL come from the (validated) path, without extra requests.
+    if (!trusted) meta = { ...archiveMeta(url), hint: "form and filed date: pass company + accession instead of url, or see list_filings." };
+    if (a.mode === "outline") {
+      const outline = outlineSections(text, meta.form as string | undefined);
+      return compact({
+        url,
+        ...meta,
+        kind,
+        mode: "outline",
+        outline,
+        total_chars: text.length,
+        hint: outline.length
+          ? "Read an item with section: '<id>', or page through it with offset = the item's offset and max_chars ≤ its chars."
+          : "No 10-K/10-Q items detected; read the text with mode 'text' and next_offset.",
+      });
+    }
     let body = text;
     let sectionInfo: Record<string, unknown> | undefined;
     if (a.section) {
@@ -139,7 +177,7 @@ export const getFilingDocument = def({
       }
       body = sec.text;
       const id = normalizeSectionId(a.section);
-      sectionInfo = { id, title: SECTION_TITLES[id] };
+      sectionInfo = { id, title: sectionTitle(id, detectForm(text, meta.form as string | undefined)) };
     }
     const start = Math.min(a.offset, body.length);
     const chunk = body.slice(start, start + a.max_chars);
@@ -161,6 +199,15 @@ export const getFilingDocument = def({
     });
   },
 });
+
+/** cik / accession / index_url from a validated https://www.sec.gov/Archives/edgar/data/<cik>/<acc18>/<file> URL. */
+export function archiveMeta(url: string): { cik?: string; accession?: string; index_url?: string } {
+  const m = /^https:\/\/www\.sec\.gov\/Archives\/edgar\/data\/(\d{1,10})\/(\d{10})(\d{2})(\d{6})\//.exec(url);
+  if (!m) return {};
+  const [, cik, a, b, c] = m;
+  const accession = `${a}-${b}-${c}`;
+  return { cik: cik!.padStart(10, "0"), accession, index_url: filingIndexUrl(cik!, accession) };
+}
 
 const FINANCIAL_METRIC_INPUTS = ["free_cash_flow", ...METRIC_KEYS, ...Object.keys(METRIC_ALIASES)] as [string, ...string[]];
 const aliasList = (keys: Iterable<string>) => {
@@ -185,6 +232,7 @@ export const getFinancialsTool = def({
       .optional()
       .describe("Subset of metrics to return (default all); aliases such as sales, eps, fcf, equity are accepted"),
   }),
+  outputSchema: financialsOutput,
   async run(a) {
     const c = await resolveCompany(a.company);
     const metrics = a.metrics ? [...new Set(a.metrics.map(canonicalMetric))].sort() : undefined;
@@ -215,6 +263,7 @@ export const getXbrlConcept = def({
       .describe("annual (≈1 year), quarterly (≈3 months), ytd (6/9-month year-to-date), instant (balance-sheet date), or any"),
     limit: z.number().int().min(1).max(200).default(20),
   }),
+  outputSchema: xbrlConceptOutput,
   async run(a) {
     const c = await resolveCompany(a.company);
     // The taxonomy prefix is checked against the enum too (e.g. abc:Assets is rejected).
@@ -250,6 +299,7 @@ export const compareCompanies = def({
       limit: z.number().int().min(1).max(100).default(20),
     })
     .refine((a) => (a.metric === undefined) !== (a.tag === undefined), { message: "Pass exactly one of metric or tag", path: ["metric"] }),
+  outputSchema: compareCompaniesOutput,
   async run(a) {
     // Validate everything that becomes a frames URL path segment before any request.
     const unit = a.unit === undefined ? undefined : normalizeFrameUnit(a.unit);
@@ -276,6 +326,7 @@ export const getInsiderTradesTool = def({
     transaction_codes: z.array(z.string().length(1)).max(20).optional().describe("Only these codes, e.g. ['P','S'] for open-market trades"),
     include_footnotes: z.boolean().default(false).describe("Include footnote and remarks text (10b5-1 plan details, price ranges); filer-written, untrusted"),
   }),
+  outputSchema: insiderTradesOutput,
   async run(a) {
     const c = await resolveCompany(a.company);
     const r = await getInsiderTrades({
@@ -312,6 +363,7 @@ export const lookupBusinessEntity = def({
       .default(false)
       .describe("Local/self-hosted use only: include names/addresses of registered agents who are individuals (natural persons), and related entity addresses. Ignored on the hosted endpoint, which always withholds them. Default false: only organizational agents are shown."),
   }),
+  outputSchema: businessEntityOutput,
   async run(a) {
     if (!a.name && !a.entity_id) throw new ToolError("INVALID_INPUT", "Provide name and/or entity_id.");
     const states = [...new Set(a.states?.length ? a.states : SUPPORTED_STATES)];
@@ -360,6 +412,7 @@ export const listSupportedStates = def({
   title: "Supported state registries & licenses",
   description: "List the state business-entity registries supported by lookup_business_entity, with dataset ids, coverage caveats, update frequency, and license/commercial-use terms.",
   inputSchema: z.object({}),
+  outputSchema: supportedStatesOutput,
   async run() {
     return {
       supported: Object.values(STATE_SOURCES).map((s) => ({
