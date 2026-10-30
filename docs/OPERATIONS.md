@@ -169,6 +169,17 @@ These are the variables a Vercel deployment needs in its **Production** environm
 
 Also recommended: usage alerts at your Redis provider, and `REVOKED_KEY_IDS` kept empty unless needed. Mint keys only after `API_KEY_SECRET` is final (rotating it invalidates them).
 
+## MCP Registry version status
+
+`.github/workflows/registry-status.yml` (**Registry status**, manual only) sets the [MCP Registry](https://registry.modelcontextprotocol.io) status of **one** version of `io.github.pgeneralpl/edgar-entity-mcp`. Use it, for example, to mark the old npm-based 0.1.0 entry as deprecated. A deprecated version stays visible with a warning, and the latest version (the highest non-deleted one) does not change. The workflow never sets `deleted` and never uses `--all-versions`.
+
+- **Run:** Actions → *Registry status* → *Run workflow*, or
+  `gh workflow run registry-status.yml -f version=0.1.0 -f status=deprecated -f message="npm package deprecated and unmaintained; use the remote endpoint https://edgar-entity-mcp.vercel.app/mcp"`
+- **Revert:** run it again with `status=active` and an empty `message` (the registry rejects a message for `active`):
+  `gh workflow run registry-status.yml -f version=0.1.0 -f status=active`
+- **Inputs are validated first:** `version` must be strict semver; `message` must be at most 500 characters and empty for `active`. It authenticates with GitHub OIDC (`id-token: write` on that job only), runs a pinned, sha256-verified `mcp-publisher` 1.8.6 (`mcp-publisher status --status … io.github.pgeneralpl/edgar-entity-mcp <version>`), and then prints every version's status from `GET /v0.1/servers/io.github.pgeneralpl%2Fedgar-entity-mcp/versions`.
+- **Check later:** `curl -s https://registry.modelcontextprotocol.io/v0.1/servers/io.github.pgeneralpl%2Fedgar-entity-mcp/versions | jq '.servers[] | {v: .server.version, s: ._meta["io.modelcontextprotocol.registry/official"].status}'`. Aggregators copy the status on their own schedule.
+
 ## Library hooks
 
 - **HTTP gate**: self-verifying keys registered in Redis (`scripts/create-key.ts` / `scripts/delete-key.ts`), `MCP_API_KEYS` static keys, or `createHttpHandler({ verifyKey: async (k) => principalOrNull })` for keys stored elsewhere. Invalid keys get 401.

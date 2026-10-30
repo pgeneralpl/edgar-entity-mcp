@@ -1,0 +1,86 @@
+name: Registry status
+# Manually set the MCP Registry status of ONE version of io.github.pgeneralpl/edgar-entity-mcp
+# (deprecated or active). Never deletes and never uses --all-versions. See docs/OPERATIONS.md.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Exact published version, e.g. 0.1.0"
+        required: true
+        type: string
+      status:
+        description: "New status for that version"
+        required: true
+        type: choice
+        options:
+          - deprecated
+          - active
+      message:
+        description: "Status message (max 500 chars; must be empty when status is active)"
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-status
+  cancel-in-progress: false
+
+jobs:
+  set-status:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # MCP Registry login via GitHub OIDC
+    env:
+      SERVER_NAME: io.github.pgeneralpl/edgar-entity-mcp
+      REGISTRY_URL: https://registry.modelcontextprotocol.io
+      VERSION: ${{ inputs.version }}
+      STATUS: ${{ inputs.status }}
+      MESSAGE: ${{ inputs.message }}
+    steps:
+      - name: Validate inputs
+        run: |
+          semver='^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-((0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*)(\.(0|[1-9][0-9]*|[0-9]*[A-Za-z-][0-9A-Za-z-]*))*))?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! [[ "$VERSION" =~ $semver ]]; then
+            echo "::error::version is not strict semver"; exit 1
+          fi
+          case "$STATUS" in
+            deprecated|active) ;;
+            *) echo "::error::status must be deprecated or active"; exit 1 ;;
+          esac
+          len=$(printf '%s' "$MESSAGE" | LC_ALL=C.UTF-8 wc -m)
+          if [ "$len" -gt 500 ]; then
+            echo "::error::message is $len characters (max 500)"; exit 1
+          fi
+          if [ "$STATUS" = "active" ] && [ -n "$MESSAGE" ]; then
+            echo "::error::message must be empty when status is active"; exit 1
+          fi
+          echo "Will set $SERVER_NAME@$VERSION -> $STATUS (message: ${len} chars)"
+      - name: Install mcp-publisher (pinned, sha256-verified)
+        env:
+          # Pinned release of github.com/modelcontextprotocol/registry. To bump: take the hash for
+          # mcp-publisher_linux_amd64.tar.gz from that release's registry_<version>_checksums.txt.
+          MCP_PUBLISHER_VERSION: "1.8.6"
+          MCP_PUBLISHER_SHA256: "1fbe93fc0783c2394d8012c8d6e50a59e98cb2cc2d216264cc69f405d0e21340"
+        run: |
+          curl -fsSL -o mcp-publisher_linux_amd64.tar.gz \
+            "https://github.com/modelcontextprotocol/registry/releases/download/v${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher_linux_amd64.tar.gz" | sha256sum -c - \
+            || { echo "::error::mcp-publisher v${MCP_PUBLISHER_VERSION} sha256 mismatch"; exit 1; }
+          tar xzf mcp-publisher_linux_amd64.tar.gz mcp-publisher
+          rm mcp-publisher_linux_amd64.tar.gz
+          ./mcp-publisher --version
+      - name: Set status (single version, never --all-versions)
+        run: |
+          ./mcp-publisher login github-oidc
+          args=(--status "$STATUS")
+          if [ -n "$MESSAGE" ]; then args+=(--message "$MESSAGE"); fi
+          ./mcp-publisher status "${args[@]}" "$SERVER_NAME" "$VERSION"
+      - name: Show version statuses
+        if: always()
+        run: |
+          curl -fsSL "$REGISTRY_URL/v0.1/servers/${SERVER_NAME//\//%2F}/versions" \
+            | jq -r '.servers[] | [.server.version, ._meta["io.modelcontextprotocol.registry/official"].status, (._meta["io.modelcontextprotocol.registry/official"].isLatest | tostring), (._meta["io.modelcontextprotocol.registry/official"].statusMessage // "")] | @tsv'
