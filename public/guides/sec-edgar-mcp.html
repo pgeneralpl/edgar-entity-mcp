@@ -285,7 +285,7 @@ nav,footer{font-size:.875em}
 <p>The hosted endpoint is a <strong>free beta with low limits</strong>, intended for interactive research, not bulk downloads.</p>
 <ul>
 <li>Usage is measured in units; a cached call usually costs 1 unit.</li>
-<li>Currently about <strong>60 units per day per IP or network and 30 per minute</strong>; limits may change without notice.</li>
+<li>Currently up to <strong>60 units per day per IP (shared networks may get less) and 30 per minute</strong>; limits may change without notice.</li>
 <li>Heavier tools cost more units (for example, Form 4 lookups and full documents).</li>
 <li>If you need more, run it locally over stdio with <code>npx -y edgar-entity-mcp</code> and set <code>SEC_USER_AGENT</code> to your own name and email. Local stdio use has no unit quotas (in both npm 0.1.0 and 0.2.0); self-hosted HTTP mode (<code>npm run start:http</code>, from 0.2.0) enforces quotas like the hosted endpoint. The local server still has to respect the SEC's fair-access limit (10 requests per second), so it throttles its SEC requests to 8 per second by default in 0.1.0 and 6 per second in 0.2.0 (<code>SEC_MAX_RPS</code>).</li>
 </ul>

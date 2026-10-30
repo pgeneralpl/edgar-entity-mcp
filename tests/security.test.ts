@@ -222,7 +222,7 @@ describe("H3: registered-agent privacy", () => {
   const co = (agent: Record<string, string>) =>
     STATE_SOURCES.CO!.normalize([{ entityid: "1", entityname: "Acme LLC", entitystatus: "Good Standing", agentprincipaladdress1: "1 Home St", agentprincipalcity: "Denver", ...agent }], (id) => `u/${id}`);
   const none = { entities: new Set<string>(), agentNames: new Set<string>() };
-  it("withholds individual agents unless include_agent_details", () => {
+  it("withholds individual agents by default; details only when includeAgentDetails is enabled (self-hosted ALLOW_PERSON_AGENT_DETAILS=1 + verified key)", () => {
     const person = co({ agentfirstname: "Jane", agentlastname: "Doe" });
     expect(person[0]!.registered_agent).toMatchObject({ kind: "individual", name: "Jane Doe" });
     const hidden = applyPrivacy(person, { includeAgentDetails: false, suppression: none });
