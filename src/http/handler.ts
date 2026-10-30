@@ -1,7 +1,7 @@
 import { createMcpHandler } from "mcp-handler";
 import type { AuthInfo } from "@modelcontextprotocol/server";
 import { registerAll, SERVER_INSTRUCTIONS, warnIfDefaultUserAgent } from "../server.js";
-import { config } from "../config.js";
+import { config, higherLimitsHint } from "../config.js";
 import { getUserUsageHooks, setSystemUsageHook, setUsageHooks, stderrUsageLogger } from "../core/usage.js";
 import { chargeQuota, settleQuota, type Principal, type QuotaStore } from "../core/quota.js";
 import { clientIp, ipPrincipal, keyFailuresExceeded, recordKeyFailure, verifyApiKey } from "../core/apiKeys.js";
@@ -116,7 +116,7 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
       // In-memory limiter in front of any Redis work: too many bad keys from one client -> 429.
       const ipId = ipPrincipal(clientIp(req)).id;
       if (keyFailuresExceeded(ipId))
-        return rpcError(429, -32001, "Too many invalid API keys from this client. Try again later.", undefined, { "retry-after": "600" });
+        return rpcError(429, -32001, "Too many invalid API keys from this client. Try again later.", { hint: "Check your API key." }, { "retry-after": "600" });
       try {
         principal = await verify(key);
       } catch (e) {
@@ -125,11 +125,11 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
       }
       if (!principal) {
         recordKeyFailure(ipId);
-        return rpcError(401, -32001, "Invalid API key.", { hint: `Check the key, or omit it to use the anonymous tier. Free keys: ${c.keyRequestUrl}` }, { "www-authenticate": 'Bearer error="invalid_token"' });
+        return rpcError(401, -32001, "Invalid API key.", { hint: `Check the key, or omit it to use the anonymous tier. ${higherLimitsHint(c.keyRequestUrl)}` }, { "www-authenticate": 'Bearer error="invalid_token"' });
       }
       token = key;
     } else {
-      if (c.requireApiKey) return rpcError(401, -32001, "An API key is required.", { hint: `Request a free key at ${c.keyRequestUrl}` }, { "www-authenticate": "Bearer" });
+      if (c.requireApiKey) return rpcError(401, -32001, "An API key is required.", { hint: `An API key is required on this server. A person may request one at ${c.keyRequestUrl}.` }, { "www-authenticate": "Bearer" });
       principal = ipPrincipal(clientIp(req));
       token = "anonymous";
     }

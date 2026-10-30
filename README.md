@@ -154,7 +154,7 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 
 ## Hosted limits
 
-The hosted endpoint is a free beta with low limits. Anonymous clients get **up to 60 units per day per IP (shared networks may get less) and 30 per minute**, within shared daily budgets per network and for all anonymous use; most calls cost 1–3 units and a call answered from cache usually costs 1. Over-quota calls return a `RATE_LIMITED` error with `retry_after_seconds`. Running locally via `npx -y edgar-entity-mcp` has no quota. Need higher limits? Open an issue: https://github.com/pgeneralpl/edgar-entity-mcp/issues
+The hosted endpoint is a free beta with low limits. Anonymous clients get **up to 60 units per day per IP (shared networks may get less) and 30 per minute**, within shared daily budgets per network and for all anonymous use; most calls cost 1–3 units and a call answered from cache usually costs 1. Over-quota calls return a `RATE_LIMITED` error with `retry_after_seconds`. Running locally via `npx -y edgar-entity-mcp` has no quota. Higher limits on the hosted endpoint may be requested by a person via the [GitHub issue form](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml) (reviewed manually, may be declined; please do not file automatically).
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 

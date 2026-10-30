@@ -49,7 +49,7 @@ export interface Config {
   degradedSecRps: number;
   /** Max concurrent upstream fetches per client (per instance). */
   maxConcurrentUpstreamPerClient: number;
-  /** Where users can request a free API key (shown in RATE_LIMITED hints). */
+  /** Where users ask for higher limits (shown in RATE_LIMITED / 401 hints). Default HIGHER_LIMITS_ISSUE_URL; KEY_REQUEST_URL (https only) overrides it for self-hosters. */
   keyRequestUrl: string;
   /** Shared secret for /health?deep=1 (header x-health-secret). Unset = deep checks disabled. */
   healthSecret?: string;
@@ -68,6 +68,22 @@ export interface Config {
   allowPersonAgentDetails: boolean;
   /** Running on Vercel (the hosted endpoint, including previews). */
   onVercel: boolean;
+}
+
+/** GitHub issue form for higher-limit requests; the single link shown in RATE_LIMITED / 401 hints. */
+export const HIGHER_LIMITS_ISSUE_URL = "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml";
+
+/** Hint (quota RATE_LIMITED, invalid-key 401) saying a person may request higher limits via the issue form. */
+export const higherLimitsHint = (url: string = HIGHER_LIMITS_ISSUE_URL): string =>
+  `Higher limits on the hosted endpoint may be requested by a person at ${url} (requests are reviewed manually and may be declined; please do not file automatically).`;
+
+/** KEY_REQUEST_URL override: only an absolute https URL is accepted; anything else falls back to HIGHER_LIMITS_ISSUE_URL. */
+export function keyRequestUrlFrom(raw: string | undefined): string {
+  const v = raw?.trim();
+  if (!v) return HIGHER_LIMITS_ISSUE_URL;
+  if (URL.canParse(v) && new URL(v).protocol === "https:") return v;
+  console.warn(`[${PACKAGE_NAME}] WARNING: KEY_REQUEST_URL is not a valid https URL; using ${HIGHER_LIMITS_ISSUE_URL} instead.`);
+  return HIGHER_LIMITS_ISSUE_URL;
 }
 
 export const DEFAULT_SEC_USER_AGENT = `${PACKAGE_NAME}/${VERSION} contact@example.com`;
@@ -138,7 +154,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     secKeyedReservedRps: Math.min(num(env.SEC_KEYED_RESERVED_RPS, 2), Math.max(0, Math.min(num(env.SEC_MAX_RPS, 6), 8) - 1)),
     degradedSecRps: Math.min(num0(env.DEGRADED_SEC_RPS, 0.2), 2),
     maxConcurrentUpstreamPerClient: num(env.MAX_CONCURRENT_UPSTREAM_PER_CLIENT, 4),
-    keyRequestUrl: env.KEY_REQUEST_URL?.trim() || "https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?title=Free+API+key+request",
+    keyRequestUrl: keyRequestUrlFrom(env.KEY_REQUEST_URL),
     healthSecret: env.HEALTH_SECRET?.trim() || undefined,
     // Stats are written only by production on Vercel (preview deployments share the env's Redis) or
     // when self-hosting (no VERCEL env var); STATS_ENABLED=0/false/off/no turns them off everywhere.
