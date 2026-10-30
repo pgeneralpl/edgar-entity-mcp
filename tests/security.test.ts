@@ -308,6 +308,7 @@ describe("M3/M4/L1: health gating, host checks, generic errors", () => {
       expect(text).not.toContain(process.version);
     }
     expect(JSON.stringify(healthPayload({} as NodeJS.ProcessEnv))).not.toMatch(/node_runtime_patched|node_version/);
+    expect(JSON.stringify(healthPayload({} as NodeJS.ProcessEnv))).not.toMatch(/minute_limits|per instance/);
   });
   it("node-server host/origin allowlists", () => {
     const hosts = ["localhost", "127.0.0.1", "[::1]"];

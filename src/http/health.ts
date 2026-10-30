@@ -34,7 +34,7 @@ export function healthPayload(env: NodeJS.ProcessEnv = process.env) {
         charging: "estimate reserved, unused part refunded after the call (minimum 1 unit)" },
       api_key: { units_per_minute: c.quota.keyPerMinute, units_per_day: c.quota.keyPerDay },
       // What rate limiting stores: integer counters under daily-rotating hashed ids, TTL = window.
-      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, api_key_secret: c.apiKeySecret ? "env" : "unset (minted keys disabled)", day_counter_ttl_hours: 25, minute_limits: "in memory per instance (not stored)" },
+      state: { ip_hash: "HMAC-SHA256, salt rotated daily (UTC)", ip_hash_secret: c.ipHashSecretSource, api_key_secret: c.apiKeySecret ? "env" : "unset (minted keys disabled)", day_counter_ttl_hours: 25 },
     },
     sec_user_agent_configured: c.secUserAgentValid,
     // Runtime version / patch state is not public (it tells attackers which CVEs apply); see ?deep=1.
