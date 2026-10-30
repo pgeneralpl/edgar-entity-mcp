@@ -6,6 +6,8 @@ import { ToolError, logError } from "./errors.js";
 import { getRedis } from "./cache.js";
 import { markRedisDegraded, redisDegraded } from "./degraded.js";
 import { currentContext } from "./context.js";
+import { statesBeyondWindow } from "../states/socrata.js";
+import { SUPPORTED_STATES } from "../states/registry.js";
 import { frameTagsFor } from "../sec/metricAliases.js";
 
 /**
@@ -91,8 +93,14 @@ export function toolCost(tool: string, args: unknown): number {
       // tickers + submissions + up to 4 history pages + one Form 4 per filing (max 20)
       return 6 + Math.min(Math.max(1, Math.floor(num(a.limit, 10))), 20);
     case "lookup_business_entity": {
-      const st = Array.isArray(a.states) && a.states.length ? new Set(a.states).size : 5;
-      return Math.min(st, 5);
+      // One registry query per state, plus one count query per state with include_total, plus one
+      // unit for any page after the first (discourages bulk enumeration). States whose page is
+      // known to be empty (OR past its row window) make no request and are not charged.
+      const offset = num(a.offset, 0);
+      const states = Array.isArray(a.states) && a.states.length ? [...new Set(a.states.map(String))] : [...SUPPORTED_STATES];
+      const st = Math.min(states.length - statesBeyondWindow(states, offset).length, 5);
+      if (st <= 0) return 0;
+      return (a.include_total === true ? st * 2 : st) + (offset > 0 ? 1 : 0);
     }
     default:
       return 2;
@@ -457,7 +465,9 @@ export function settleQuota(): void {
   const r = ctx?.reservation as Reservation | undefined;
   if (!ctx || !r) return;
   ctx.reservation = undefined;
-  const actual = Math.min(r.cost, Math.max(1, ctx.upstream ?? 0, Math.ceil((ctx.redisReadBytes ?? 0) / REDIS_READ_BYTES_PER_UNIT)));
+  const actual = ctx.free
+    ? 0
+    : Math.min(r.cost, Math.max(1, (ctx.upstream ?? 0) + (ctx.surcharge ?? 0), Math.ceil((ctx.redisReadBytes ?? 0) / REDIS_READ_BYTES_PER_UNIT)));
   const back = r.cost - actual;
   if (back <= 0) return;
   r.store.refund?.(r.p, back, r.limits, r.at);

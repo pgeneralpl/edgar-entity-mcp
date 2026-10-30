@@ -59,7 +59,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | `compare_companies` | 1 per frame requested + 1 for resolving companies: 2 with `tag`; tags tried + 1 with `metric` (max 3 tags → 4; e.g. `revenue` / `net_income` 4 reserved, `gross_profit` 2), unused reservation refunded |
 | `get_filing_document` | 4 by `url`, 10 by `company` + `accession` |
 | `get_insider_trades` | 6 + `limit` (max 20 filings → 26) |
-| `lookup_business_entity` | number of states (max 5) |
+| `lookup_business_entity` | number of states (max 5); × 2 with `include_total`; + 1 when `offset` > 0 (max 11). OR is not counted (0 if it is the only state) once `offset` is past its 300-row window (59), where the call returns an empty page without querying. Anonymous HTTP callers cannot use `offset` > 100; `name` is limited to 100 characters (after NFKC), `contains` needs a 3+ character word and `starts_with` a 2+ character word; rejected calls are refunded |
 
 | Client | Per minute | Per day (UTC) |
 |---|---|---|
@@ -86,7 +86,7 @@ API keys are optional; the hosted endpoint works without one. Keys are minted by
 
 ### Degraded mode
 
-If the backing store (Redis) is unavailable, the server degrades instead of failing: it falls back to local quotas, anonymous callers are served from cache only (`RATE_LIMITED`, `scope: "degraded"`, for anything else), API-key callers get SEC data at `DEGRADED_SEC_RPS` (`0` = refuse) and keys in `REVOKED_KEY_IDS` are still refused. State-registry lookups are refused when the suppression list could not be loaded. `/health` reports `status: "degraded"`.
+If the backing store (Redis) is unavailable, the server degrades instead of failing: it falls back to local quotas, anonymous callers are served from cache only (`RATE_LIMITED`, `scope: "degraded"`, for anything else), API-key callers get SEC data at `DEGRADED_SEC_RPS` (`0` = refuse) and keys in `REVOKED_KEY_IDS` are still refused. MAC-valid keys accepted without the Redis lookup are unverified but still count as API-key callers for pagination: the anonymous `lookup_business_entity` offset cap (100) does **not** apply to them, so a key that was revoked only in Redis can page up to offset 500 until Redis is back (use `REVOKED_KEY_IDS` for urgent revocation). State-registry lookups are refused when the suppression list could not be loaded. `/health` reports `status: "degraded"`.
 
 Size your Redis plan for your own quotas: request volume is bounded by the daily quotas and stored data by the [Redis memory budget](#redis-memory-budget). Enable your provider's usage alerts.
 

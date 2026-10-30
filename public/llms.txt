@@ -10,7 +10,7 @@
 - MCP Registry name: io.github.pgeneralpl/edgar-entity-mcp
 
 ## Tools
-- search_company: find SEC registrants by name or ticker; returns CIK and tickers.
+- search_company: find SEC registrants by name or ticker (typo-tolerant, knows well-known former names such as Facebook); returns CIK and tickers.
 - get_company_profile: EDGAR company profile (SIC/industry, addresses, fiscal year end, former names, latest 10-K/10-Q).
 - list_filings: list a company's SEC filings, filterable by form type (10-K, 10-Q, 8-K, ...) and date range.
 - get_filing_document: read the text of a filing document, with an outline mode (items with offsets and lengths, no text), 10-K/10-Q item extraction and paging (10,000 characters per call by default).
@@ -18,7 +18,7 @@
 - get_xbrl_concept: history of a single XBRL concept for one company, filterable by duration (annual, quarterly, year-to-date, instant).
 - compare_companies: compare companies on one metric (e.g. revenue, with fallback across XBRL tags) or one XBRL tag for a calendar period (XBRL frames).
 - get_insider_trades: Form 4 insider transactions with insider role and plain-English meaning of transaction codes.
-- lookup_business_entity: search Secretary of State registries (official open data) by entity name or id.
+- lookup_business_entity: search Secretary of State registries (official open data) by entity name or id; ranked results with limit/offset pagination.
 - list_supported_states: supported states, coverage caveats and data license terms.
 
 ## State coverage

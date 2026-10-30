@@ -12,6 +12,10 @@ export interface CallContext {
   redisReadBytes?: number;
   /** Quota reservation made before the call, settled (refunded) after it. */
   reservation?: unknown;
+  /** Units charged on top of the upstream requests (e.g. +1 for registry pages after the first). */
+  surcharge?: number;
+  /** Refund the whole reservation (call rejected before any upstream work). */
+  free?: boolean;
 }
 const als = new AsyncLocalStorage<CallContext>();
 export function runWithContext<T>(ctx: CallContext, fn: () => Promise<T>): Promise<T> {
@@ -27,6 +31,12 @@ export function currentContext(): CallContext | undefined {
 export function callerIsTrusted(): boolean {
   const c = als.getStore();
   return !c || c.transport === "stdio" || (c.principal?.tier === "key" && !c.principal.unverified);
+}
+
+/** Anonymous (keyless) caller of the HTTP endpoint, i.e. the hosted server's public tier. */
+export function callerIsAnonymous(): boolean {
+  const c = als.getStore();
+  return !!c && c.transport === "http" && c.principal?.tier !== "key";
 }
 
 /**

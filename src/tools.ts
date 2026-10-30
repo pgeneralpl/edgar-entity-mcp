@@ -1,10 +1,10 @@
 import { z } from "zod";
 import { ToolError, toToolError } from "./core/errors.js";
 import { UNTRUSTED_NOTICE, cleanDeep, wrapUntrusted } from "./core/untrusted.js";
-import { personAgentDetailsAllowed } from "./core/context.js";
+import { callerIsAnonymous, currentContext, personAgentDetailsAllowed } from "./core/context.js";
 import { loadSuppression } from "./states/suppression.js";
 import { compact } from "./core/util.js";
-import { resolveCompany, searchCompanies } from "./sec/tickers.js";
+import { NOT_LISTED_HINT, TICKERS_EXCHANGE_URL, edgarCompanySearchUrl, resolveCompany, searchCompanies, suggestCompaniesFor } from "./sec/tickers.js";
 import { buildProfile, getSubmissions, listFilings, findFiling } from "./sec/submissions.js";
 import { extractSection, fetchDocumentText, listSections, normalizeSectionId, outlineSections, detectForm, sectionTitle } from "./sec/documents.js";
 import {
@@ -23,7 +23,7 @@ import { getFinancials, METRIC_KEYS } from "./sec/financials.js";
 import { CONCEPT_TAXONOMIES, DURATIONS, FRAME_TAXONOMIES, TAG_HINT, TAG_RE, getConcept, getFrame, getMetricFrame, normalizeFrameUnit, splitTag } from "./sec/xbrl.js";
 import { FRAME_METRIC_INPUTS, FRAME_METRIC_KEYS, METRIC_ALIASES, canonicalMetric } from "./sec/metricAliases.js";
 import { getInsiderTrades } from "./sec/insider.js";
-import { searchState, type MatchMode } from "./states/socrata.js";
+import { ANON_MAX_OFFSET, ENTITY_ID_RE, MAX_OFFSET, NAME_MAX_CHARS, assertContainsName, assertStartsWithName, prepareEntityName, searchState, statesBeyondWindow, type MatchMode } from "./states/socrata.js";
 import { COLORADO_DISCLAIMER, STATE_SOURCES, SUPPORTED_STATES, UNSUPPORTED_NOTES } from "./states/registry.js";
 import { filingIndexUrl, normalizeAccession } from "./core/util.js";
 
@@ -57,19 +57,22 @@ export const searchCompany = def({
   name: "search_company",
   title: "Search SEC registrants",
   description:
-    "Find SEC-registered public companies by ticker or name (fuzzy). Returns CIK (the SEC id used by every other tool), name, tickers, exchange and a match score (100 = exact ticker). Source: SEC company_tickers_exchange.json (companies with a listed ticker).",
+    "Find SEC-registered public companies by ticker or name. Matching ignores case, punctuation, '&' vs 'and' and legal suffixes (Inc/Inc./Corp/Corporation/Co/Company/LLC/Ltd...), tolerates typos ('Microsfot' -> Microsoft) and knows well-known former names (matched_former_name, e.g. 'Facebook' -> Meta Platforms). Returns CIK (the SEC id used by every other tool), name, tickers, exchange and a match score (100 = exact ticker, 97 = exact name, < 80 = fuzzy). With no match it returns did_you_mean suggestions. Source: SEC company_tickers_exchange.json (companies with a listed ticker only); private or non-SEC companies: use lookup_business_entity.",
   inputSchema: z.object({
-    query: z.string().min(1).max(200).describe("Ticker or company name, e.g. 'MSFT', 'berkshire', 'Tesla Inc'"),
+    query: z.string().min(1).max(200).describe("Ticker or company name, e.g. 'MSFT', 'berkshire', 'Tesla Inc', 'Johnson and Johnson'"),
     limit: z.number().int().min(1).max(25).default(5),
   }),
   outputSchema: searchCompanyOutput,
   async run({ query, limit }) {
     const matches = await searchCompanies(query, limit);
+    if (matches.length) return { query, matches, source_url: TICKERS_EXCHANGE_URL };
     return {
       query,
       matches,
-      ...(matches.length ? {} : { hint: "No ticker match. Unlisted/private filers are not in this list; try EDGAR full-text search or pass a CIK." }),
-      source_url: "https://www.sec.gov/files/company_tickers_exchange.json",
+      did_you_mean: await suggestCompaniesFor(query, 5),
+      hint: NOT_LISTED_HINT,
+      edgar_company_search_url: edgarCompanySearchUrl(query),
+      source_url: TICKERS_EXCHANGE_URL,
     };
   },
 });
@@ -274,10 +277,13 @@ export const getXbrlConcept = def({
   },
 });
 
+const COMPARE_UNRESOLVED_HINT =
+  "compare_companies matches tickers, CIKs and exact or prefix company names only (no typo correction). Use search_company to find the ticker or CIK, then call again with it.";
+
 export const compareCompanies = def({
   name: "compare_companies",
   title: "Cross-company comparison (XBRL frames)",
-  description: `Compare one financial metric or XBRL concept across ALL reporting companies for a CALENDAR period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Pass metric (${FRAME_METRIC_KEYS.join(", ")}; aliases like sales, eps, assets) to fall back across the common tags for it (revenue: Revenues > RevenueFromContractWithCustomerExcludingAssessedTax > SalesRevenueNet), with the tag used per company; or pass tag for one exact concept. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, for balance-sheet items; added automatically for balance-sheet metrics). Calendar basis: each filer's ~1-year (or ~3-month) period that best fits the calendar period, so CY2024 for Microsoft is its fiscal year ending 2024-06-30 (flagged fiscal_period_differs); use get_financials for fiscal years. accn is the latest filing reporting the value. Pass companies to filter to specific tickers/CIKs; otherwise returns the top \`limit\` by value.`,
+  description: `Compare one financial metric or XBRL concept across ALL reporting companies for a CALENDAR period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Pass metric (${FRAME_METRIC_KEYS.join(", ")}; aliases like sales, eps, assets) to fall back across the common tags for it (revenue: Revenues > RevenueFromContractWithCustomerExcludingAssessedTax > SalesRevenueNet), with the tag used per company; or pass tag for one exact concept. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, for balance-sheet items; added automatically for balance-sheet metrics). Calendar basis: each filer's ~1-year (or ~3-month) period that best fits the calendar period, so CY2024 for Microsoft is its fiscal year ending 2024-06-30 (flagged fiscal_period_differs); use get_financials for fiscal years. accn is the latest filing reporting the value. Pass companies to filter to specific tickers/CIKs (exact or prefix names also work, without typo correction; unresolved items are listed in \`unresolved\`); otherwise returns the top \`limit\` by value.`,
   inputSchema: z
     .object({
       metric: z
@@ -294,7 +300,7 @@ export const compareCompanies = def({
       period: z.string().min(4).max(12).describe("CY2024, CY2024Q3, or CY2024Q4I"),
       taxonomy: z.enum(FRAME_TAXONOMIES).default("us-gaap").describe("For tag only"),
       unit: z.string().max(40).optional().describe("USD (default), USD-per-shares, shares, pure. With metric, defaults to the metric's unit"),
-      companies: z.array(z.string().min(1).max(200)).max(25).optional().describe("Tickers or CIKs to include (default: all)"),
+      companies: z.array(z.string().min(1).max(40)).max(25).optional().describe("Tickers or CIKs to include (default: all)"),
       order: z.enum(["desc", "asc"]).default("desc"),
       limit: z.number().int().min(1).max(100).default(20),
     })
@@ -305,10 +311,27 @@ export const compareCompanies = def({
     const unit = a.unit === undefined ? undefined : normalizeFrameUnit(a.unit);
     const ref = a.tag === undefined ? undefined : splitTag(a.tag, a.taxonomy, FRAME_TAXONOMIES);
     let ciks: string[] | undefined;
-    if (a.companies?.length) ciks = await Promise.all(a.companies.map(async (x) => (await resolveCompany(x)).cik));
-    if (a.metric) return compact(await getMetricFrame({ metric: a.metric, period: a.period, unit, ciks, limit: a.limit, order: a.order }));
+    let unresolved: { company: string; code: string; message: string; candidates?: unknown }[] | undefined;
+    if (a.companies?.length) {
+      // Up to 25 items per call: exact/prefix matching only. Typo ranking and did-you-mean would each run
+      // a full pass over the ticker list per item; unresolved items are reported instead.
+      const settled = await Promise.allSettled(a.companies.map((x) => resolveCompany(x, { suggest: false, fuzzy: false })));
+      ciks = [];
+      unresolved = [];
+      for (const [i, r] of settled.entries()) {
+        if (r.status === "fulfilled") ciks.push(r.value.cik);
+        else if (r.reason instanceof ToolError && (r.reason.code === "NOT_FOUND" || r.reason.code === "AMBIGUOUS" || r.reason.code === "INVALID_INPUT"))
+          unresolved.push({ company: a.companies[i]!, code: r.reason.code, message: r.reason.message, candidates: r.reason.details?.candidates });
+        else throw r.reason;
+      }
+      if (!ciks.length)
+        throw new ToolError("NOT_FOUND", "None of the companies could be resolved.", COMPARE_UNRESOLVED_HINT, { unresolved });
+    }
+    const extra = unresolved?.length ? { unresolved, unresolved_hint: COMPARE_UNRESOLVED_HINT } : {};
+    if (a.metric) return compact({ ...(await getMetricFrame({ metric: a.metric, period: a.period, unit, ciks, limit: a.limit, order: a.order })), ...extra });
     const { taxonomy, tag } = ref!;
-    return compact(await getFrame({ taxonomy, tag, unit: unit ?? "USD", period: a.period, ciks, limit: a.limit, order: a.order }));
+    const frame = await getFrame({ taxonomy, tag, unit: unit ?? "USD", period: a.period, ciks, limit: a.limit, order: a.order });
+    return compact({ ...frame, ...extra });
   },
 });
 
@@ -350,14 +373,25 @@ export const getInsiderTradesTool = def({
 export const lookupBusinessEntity = def({
   name: "lookup_business_entity",
   title: "State business-entity registry lookup",
-  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are withheld on the hosted endpoint; automated classification), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.`,
+  description: `Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: ${SUPPORTED_STATES.join(", ")} (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Name matching ignores case, punctuation, '&' vs 'and' and legal-suffix spelling (Inc/Inc./Incorporated, Co/Company, LLC/L.L.C.); results are ranked exact > prefix > other matches, active entities first within each tier. Paginate per state with limit/offset (has_more, next_offset; total when include_total=true or on the last page). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are withheld on the hosted endpoint; automated classification), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names; for SEC-listed companies use search_company. Call list_supported_states for coverage and licenses.`,
   inputSchema: z.object({
-    name: z.string().min(2).max(200).optional().describe("Entity name or fragment, e.g. 'Tiffany and Company'"),
-    entity_id: z.string().min(1).max(40).optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
+    name: z.string().min(2).max(NAME_MAX_CHARS).optional().describe("Entity name or fragment, e.g. 'Tiffany & Co.' (also matches 'TIFFANY AND COMPANY')"),
+    entity_id: z.string().regex(ENTITY_ID_RE, "Letters, digits and '-' only (max 40)").optional().describe("State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state."),
     states: z.array(z.enum(SUPPORTED_STATES as [string, ...string[]])).max(5).optional().describe("Default: all supported states"),
     match: z.enum(["contains", "starts_with", "exact"]).default("contains"),
     active_only: z.boolean().default(false).describe("Exclude dissolved/inactive entities (CO, CT)"),
-    limit: z.number().int().min(1).max(25).default(5).describe("Max results per state"),
+    limit: z.number().int().min(1).max(25).default(5).describe("Max results per state (page size)"),
+    offset: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_OFFSET)
+      .default(0)
+      .describe(`Skip this many results per state (pagination; use next_offset from the previous page). Max ${MAX_OFFSET} (${ANON_MAX_OFFSET} without an API key on the hosted server); pages after the first count one extra quota unit.`),
+    include_total: z
+      .boolean()
+      .default(false)
+      .describe("Also count all matches per state (one extra registry request per state; doubles the quota cost)."),
     include_agent_details: z
       .boolean()
       .default(false)
@@ -365,8 +399,28 @@ export const lookupBusinessEntity = def({
   }),
   outputSchema: businessEntityOutput,
   async run(a) {
-    if (!a.name && !a.entity_id) throw new ToolError("INVALID_INPUT", "Provide name and/or entity_id.");
+    const ctx = currentContext();
+    // Input checks that reject the whole call run before any upstream request and charge nothing.
+    const reject = (msg: string, hint?: string): never => {
+      if (ctx) ctx.free = true;
+      throw new ToolError("INVALID_INPUT", msg, hint);
+    };
+    if (!a.name && !a.entity_id) reject("Provide name and/or entity_id.");
+    if (a.offset > ANON_MAX_OFFSET && callerIsAnonymous())
+      reject(`offset is limited to ${ANON_MAX_OFFSET} for anonymous use.`, "Refine the name (match='starts_with' or 'exact', a single state) or use an API key.");
+    if (a.name) {
+      try {
+        const name = prepareEntityName(a.name); // NFKC + length cap before any $where is built
+        if (a.match === "contains") assertContainsName(name);
+        if (a.match === "starts_with") assertStartsWithName(name);
+      } catch (e) {
+        if (ctx) ctx.free = true;
+        throw e;
+      }
+    }
     const states = [...new Set(a.states?.length ? a.states : SUPPORTED_STATES)];
+    // Pages after the first cost one extra unit (kept at settlement), unless no state is queried at all.
+    if (ctx && a.offset > 0 && statesBeyondWindow(states, a.offset).length < states.length) ctx.surcharge = 1;
     // Natural-person agent details: never on the hosted endpoint; local stdio, or self-hosted HTTP with
     // ALLOW_PERSON_AGENT_DETAILS=1 and a verified API key (see personAgentDetailsAllowed).
     const detailsAllowed = personAgentDetailsAllowed();
@@ -374,16 +428,42 @@ export const lookupBusinessEntity = def({
     const suppression = await loadSuppression(); // M-c: refuse before any upstream request if unavailable
     const settled = await Promise.allSettled(
       states.map((st) =>
-        searchState(st, { name: a.name, entityId: a.entity_id, mode: a.match as MatchMode, limit: a.limit, activeOnly: a.active_only, includeAgentDetails, suppression }),
+        searchState(st, {
+          name: a.name,
+          entityId: a.entity_id,
+          mode: a.match as MatchMode,
+          limit: a.limit,
+          offset: a.offset,
+          includeTotal: a.include_total,
+          activeOnly: a.active_only,
+          includeAgentDetails,
+          suppression,
+        }),
       ),
     );
     const results: unknown[] = [];
     const byState: Record<string, unknown> = {};
+    let anyMore = false;
+    let totalKnown = true;
+    let total = 0;
     settled.forEach((r, i) => {
       const st = states[i]!;
       if (r.status === "fulfilled") {
         results.push(...r.value.entities);
-        byState[st] = { count: r.value.entities.length, query_url: r.value.query_url };
+        const v = r.value;
+        if (v.has_more) anyMore = true;
+        if (v.total === undefined) totalKnown = false;
+        else total += v.total;
+        byState[st] = compact({
+          count: v.entities.length,
+          offset: v.offset,
+          has_more: v.has_more,
+          next_offset: v.has_more ? v.offset + a.limit : undefined,
+          total: v.total,
+          active_only_dataset: v.active_only_dataset,
+          note: v.note,
+          query_url: v.query_url,
+        });
       } else {
         const te = toToolError(r.reason);
         if (te.code === "RATE_LIMITED") throw te;
@@ -392,9 +472,18 @@ export const lookupBusinessEntity = def({
     });
     const withheld = JSON.stringify(results).includes('"withheld":true');
     return compact({
-      query: { name: a.name, entity_id: a.entity_id, match: a.match },
+      query: { name: a.name, entity_id: a.entity_id, match: a.match, active_only: a.active_only },
       results,
+      count: results.length,
+      offset: a.offset,
+      has_more: anyMore,
+      next_offset: anyMore ? a.offset + a.limit : undefined,
+      total: totalKnown && settled.every((r) => r.status === "fulfilled") ? total : undefined,
       by_state: byState,
+      active_only_note:
+        a.active_only && states.some((st) => STATE_SOURCES[st] && !STATE_SOURCES[st]!.activeWhere)
+          ? "active_only filters CO and CT by status; NY, OR and PA datasets list active entities only, so they are unaffected."
+          : undefined,
       notice: states.includes("CO") ? "CO data modified from its original source, the State of Colorado, which makes no warranty; see list_supported_states." : undefined,
       privacy:
         a.include_agent_details && !detailsAllowed

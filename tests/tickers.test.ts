@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { coreTokens, dice, parseTickerExchangeFile, rankCompanies, scoreMatch, type TickerRow } from "../src/sec/tickers.js";
+import { coreTokens, dice, edgarCompanySearchUrl, parseTickerExchangeFile, rankCompanies, scoreMatch, suggestCompanies, type TickerRow } from "../src/sec/tickers.js";
 
 const rows: TickerRow[] = parseTickerExchangeFile({
   fields: ["cik", "name", "ticker", "exchange"],
@@ -11,8 +11,14 @@ const rows: TickerRow[] = parseTickerExchangeFile({
     [1318605, "Tesla, Inc.", "TSLA", "Nasdaq"],
     [1, "APPLE HOSPITALITY REIT, INC.", "APLE", "NYSE"],
     [2, "Applied Materials Inc", "AMAT", "Nasdaq"],
+    [200406, "JOHNSON & JOHNSON", "JNJ", "NYSE"],
+    [1326801, "Meta Platforms, Inc.", "META", "Nasdaq"],
+    [21344, "COCA COLA CO", "KO", "NYSE"],
+    [1584509, "Aramark", "ARMK", "NYSE"],
   ],
 });
+
+const MATCH_THRESHOLD_FOR_TEST = 40;
 
 describe("ticker search", () => {
   it("parses the exchange file", () => {
@@ -41,4 +47,36 @@ describe("ticker search", () => {
     expect(dice("NIGHT", "NACHT")).toBeCloseTo(0.25);
     expect(dice("ABC", "ABC")).toBe(1);
   });
+  it("normalises &/and, suffixes, punctuation and case", () => {
+    for (const q of ["Johnson and Johnson", "johnson & johnson", "JOHNSON & JOHNSON INC."]) expect(rankCompanies(rows, q, 1)[0]?.name).toBe("JOHNSON & JOHNSON");
+    expect(rankCompanies(rows, "Johnson and Johnson", 1)[0]!.score).toBeGreaterThanOrEqual(95);
+    expect(rankCompanies(rows, "The Coca-Cola Company", 1)[0]!.score).toBeGreaterThanOrEqual(95);
+    expect(rankCompanies(rows, "microsoft corporation", 1)[0]!.score).toBeGreaterThanOrEqual(95);
+  });
+  it("scores typos below the auto-resolve threshold (80)", () => {
+    for (const q of ["Microsfot", "Teslla", "berkshre hathaway"]) {
+      const top = rankCompanies(rows, q, 3)[0]!;
+      expect(top.score).toBeGreaterThanOrEqual(MATCH_THRESHOLD_FOR_TEST);
+      expect(top.score).toBeLessThan(80);
+    }
+    expect(rankCompanies(rows, "Microsfot", 1)[0]!.tickers).toEqual(["MSFT"]);
+    expect(rankCompanies(rows, "zzqxj", 5)).toEqual([]); // no garbage matches
+  });
+  it("matches curated former names", () => {
+    const [m] = rankCompanies(rows, "Facebook", 3);
+    expect(m!.tickers).toEqual(["META"]);
+    expect(m!.matched_former_name).toBe("Facebook Inc");
+    expect(m!.score).toBeGreaterThanOrEqual(80);
+    expect(rankCompanies(rows, "Apple Computer", 1)[0]!.matched_former_name).toBe("Apple Computer Inc");
+    expect(rankCompanies(rows, "Apple", 1)[0]!.matched_former_name).toBeUndefined();
+  });
+  it("suggests near misses and links EDGAR full company search", () => {
+    const s = suggestCompanies(rows, "Johnsen Johnsen", 3);
+    expect(s.map((x) => x.name)).toContain("JOHNSON & JOHNSON");
+    expect(suggestCompanies(rows, "qqqqqq", 3)).toEqual([]);
+    const u = new URL(edgarCompanySearchUrl("Tiffany & Co" + "x".repeat(300)));
+    expect(u.hostname).toBe("www.sec.gov");
+    expect(u.searchParams.get("company")!.length).toBeLessThanOrEqual(100);
+  });
 });
+
