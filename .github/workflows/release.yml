@@ -1,9 +1,8 @@
 name: Release
-# Publishes to npm (Trusted Publishing via GitHub OIDC, with provenance) and to the
-# official MCP Registry (GitHub OIDC) when a GitHub release is published.
-# One-time setup after the first manual `npm publish`:
-#   npm trust github edgar-entity-mcp --file release.yml --repo pgeneralpl/edgar-entity-mcp --allow-publish --yes
-# (or npmjs.com → package → Settings → Trusted Publisher → GitHub Actions, workflow `release.yml`).
+# Publishes server.json to the official MCP Registry (remote endpoint only, no packages)
+# via GitHub OIDC. The npm package edgar-entity-mcp is deprecated and is no longer published.
+# Each registry version must be unique: bump package.json, run `npm run gen`, then publish a
+# GitHub release vX.Y.Z (or run this workflow manually).
 on:
   release:
     types: [published]
@@ -11,41 +10,32 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm Trusted Publishing + MCP Registry OIDC
 
 jobs:
-  publish:
+  publish-registry:
     runs-on: ubuntu-latest
-    env:
-      SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+    permissions:
+      contents: read
+      id-token: write # MCP Registry login via GitHub OIDC
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version-file: .nvmrc # 24.22.1 (patched); npm >= 11.5.1 is required for Trusted Publishing
+          node-version-file: .nvmrc # 24.22.1 (patched)
           check-latest: true
-          registry-url: https://registry.npmjs.org
-          cache: npm
       - name: Assert patched Node
         run: node scripts/check-node-version.mjs
-      - name: Check versions match the tag
+      - name: Check versions match (and the tag on release)
         run: |
           PKG=$(node -p "require('./package.json').version")
           SRV=$(node -p "require('./server.json').version")
-          SRV_NPM=$(node -p "require('./server.json').packages[0].version")
-          echo "package.json=$PKG server.json=$SRV server.json npm=$SRV_NPM ref=$GITHUB_REF_NAME"
-          [ "$PKG" = "$SRV" ] && [ "$PKG" = "$SRV_NPM" ] || { echo "::error::version mismatch"; exit 1; }
+          echo "package.json=$PKG server.json=$SRV ref=$GITHUB_REF_NAME"
+          [ "$PKG" = "$SRV" ] || { echo "::error::version mismatch: package.json $PKG vs server.json $SRV"; exit 1; }
           if [ "$GITHUB_EVENT_NAME" = "release" ] && [ "$GITHUB_REF_NAME" != "v$PKG" ]; then
             echo "::error::tag $GITHUB_REF_NAME does not match v$PKG"; exit 1
           fi
-          echo "VERSION=$PKG" >> "$GITHUB_ENV"
-      - run: npm ci
-      - name: Publish to npm (skipped if this version is already published)
-        run: |
-          if npm view "edgar-entity-mcp@$VERSION" version >/dev/null 2>&1; then
-            echo "::notice::edgar-entity-mcp@$VERSION already on npm; skipping"
-          else
-            npm publish --access public
+          if node -e "process.exit(require('./server.json').packages?.length ? 0 : 1)"; then
+            echo "::error::server.json must not list packages (npm is deprecated)"; exit 1
           fi
       - name: Install mcp-publisher
         run: |

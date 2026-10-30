@@ -6,9 +6,9 @@ Repo: https://github.com/pgeneralpl/edgar-entity-mcp · Live endpoint: `https://
 
 1. ~~`gh repo create pgeneralpl/edgar-entity-mcp --public --source . --push`~~ (done)
 2. ~~Set owner `pgeneralpl` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file~~ (done)
-3. ~~`npm publish --access public`~~ (done: https://www.npmjs.com/package/edgar-entity-mcp, v0.1.0, published 2026-10-20).
+3. ~~`npm publish --access public`~~ (v0.1.0 was published 2026-10-20). **The npm package is deprecated and no longer maintained; nothing further is published to npm.**
 4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`; GitHub auto-deploy and the Upstash Redis store are connected). Production configuration: see [docs/OPERATIONS.md](docs/OPERATIONS.md#production-configuration).
-5. Future releases: bump the version in `package.json` and `server.json` (both places), commit, then `gh release create vX.Y.Z`. `.github/workflows/release.yml` publishes to npm via Trusted Publishing and to the MCP Registry via GitHub OIDC (after the one-time `npm trust github …` setup noted in that file). **Still open:** the npm Trusted Publisher must be added in the web UI (https://www.npmjs.com/package/edgar-entity-mcp/access → Trusted Publisher → GitHub Actions: owner `pgeneralpl`, repo `edgar-entity-mcp`, workflow `release.yml`).
+5. Future releases: bump the version in `package.json`, run `npm run gen` (copies it into `server.json`), commit, then `gh release create vX.Y.Z` (or run the Release workflow manually). `.github/workflows/release.yml` publishes only to the MCP Registry (remote endpoint, no package) via GitHub OIDC.
 6. ~~MCP Registry (first release)~~ (done: `io.github.pgeneralpl/edgar-entity-mcp` 0.1.0, active).
 7. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → `https://edgar-entity-mcp.vercel.app/mcp`. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
 
@@ -27,7 +27,7 @@ edgar-entity-mcp gives agents one tool belt for researching US companies using o
 - **Insider trades**: Form 4 parsed into plain English, with an open-market buys vs. sales summary.
 - **Business entities**: Secretary of State registry search for NY, CO, OR, CT and PA. Returns status, type, formation date, jurisdiction, addresses and registered agent.
 
-Responses are compact JSON with source URLs. The server respects SEC fair-access rules (User-Agent, a fleet-wide 6 req/s token bucket that fails closed, retries) and caches with Upstash or in memory. It runs as stdio (`npx -y edgar-entity-mcp`) or remotely over Streamable HTTP. MIT licensed.
+Responses are compact JSON with source URLs. The server respects SEC fair-access rules (User-Agent, a fleet-wide 6 req/s token bucket that fails closed, retries) and caches with Upstash or in memory. It runs remotely over Streamable HTTP (hosted endpoint) or locally over stdio from the GitHub source. MIT licensed.
 
 **Tags:** finance, sec, edgar, xbrl, research, company-data, kyc, due-diligence
 
@@ -44,7 +44,7 @@ Ten read-only tools for analysts, founders and researchers: `search_company`, `g
 **Title:** edgar-entity-mcp: SEC EDGAR + Secretary of State data
 **One-liner:** Filings, financials, insider trades and business-entity lookups for US companies, built for agents.
 **Description:**
-A vertical MCP server for US company research. It combines SEC EDGAR (submissions, XBRL companyfacts/concept/frames, Form 4 XML, filing documents) with five state business-entity registries published as open data. Agent-friendly details: names or tickers are accepted wherever a CIK is needed, outputs are compact JSON with source URLs, long documents are paged, errors include hints, and the server documents which XBRL tag produced each number. Each state source was license-checked for commercial use; see DATA_SOURCES.md. Available on npm (stdio) and as a remote Streamable HTTP endpoint.
+A vertical MCP server for US company research. It combines SEC EDGAR (submissions, XBRL companyfacts/concept/frames, Form 4 XML, filing documents) with five state business-entity registries published as open data. Agent-friendly details: names or tickers are accepted wherever a CIK is needed, outputs are compact JSON with source URLs, long documents are paged, errors include hints, and the server documents which XBRL tag produced each number. Each state source was license-checked for commercial use; see DATA_SOURCES.md. Available as a remote Streamable HTTP endpoint; the source can also be run locally over stdio.
 **Use cases:** equity research, competitive analysis, KYB / vendor due diligence, sales prospecting, journalism, academic research.
 
 ---
@@ -53,8 +53,8 @@ A vertical MCP server for US company research. It combines SEC EDGAR (submission
 
 1/ I built an MCP server for researching US companies, made for AI agents.
 
-SEC EDGAR + state Secretary of State registries in one install:
-`npx -y edgar-entity-mcp`
+SEC EDGAR + state Secretary of State registries in one endpoint:
+`https://edgar-entity-mcp.vercel.app/mcp`
 
 The data is free, official and commercially usable. 🧵
 
@@ -94,7 +94,7 @@ So I built **edgar-entity-mcp**, an MCP server that connects agents to official 
 
 **Data licensing was step one.** I only enabled states whose open data permits commercial reuse. NY uses the OPEN-NY terms. CO, CT and PA are public domain, with CO requiring a disclaimer. Oregon is public domain by statute. All of it is documented in the repo.
 
-**It's a free hobby project:** the npm package (stdio, MIT) and a keyless hosted endpoint with caching and low limits. There are no paid plans.
+**It's a free hobby project:** MIT-licensed source on GitHub and a keyless hosted endpoint with caching and low limits. There are no paid plans.
 
 **Stack:** TypeScript, the official MCP SDK v2, zod, Vercel's `mcp-handler`, and Upstash Redis for a shared cache and a fleet-wide SEC rate budget.
 

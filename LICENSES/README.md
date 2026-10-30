@@ -21,4 +21,4 @@ It is also returned by the `list_supported_states` tool, shown in `public/index.
 
 ## Third-party npm dependencies
 
-Runtime dependencies are permissively licensed (`@modelcontextprotocol/server` Apache-2.0, `mcp-handler` Apache-2.0, `zod` MIT, `@upstash/redis` MIT, `lru-cache` BlueOak-1.0.0, `fast-xml-parser` MIT, `html-to-text` MIT). Run `npx license-checker --production --summary` before publishing.
+Runtime dependencies are permissively licensed (`@modelcontextprotocol/server` Apache-2.0, `mcp-handler` Apache-2.0, `zod` MIT, `@upstash/redis` MIT, `lru-cache` BlueOak-1.0.0, `fast-xml-parser` MIT, `html-to-text` MIT). Run `npx license-checker --production --summary` before a release.

@@ -79,7 +79,7 @@ describe("limit hints point at the higher-limits issue form", () => {
     expect(e).toBeInstanceOf(ToolError);
     expect((e as ToolError).code).toBe("RATE_LIMITED");
     expect((e as ToolError).details).toMatchObject({ scope: "degraded", retry_after_seconds: 120 });
-    expect((e as ToolError).hint).toBe("Retry in a few minutes, or run the server locally with `npx -y edgar-entity-mcp`.");
+    expect((e as ToolError).hint).toBe("Retry in a few minutes, or run the server locally from source (https://github.com/pgeneralpl/edgar-entity-mcp).");
     expect((e as ToolError).hint).not.toContain(HIGHER_LIMITS_ISSUE_URL);
   });
 

@@ -14,7 +14,7 @@ if (arg === "--version" || arg === "-v") {
 if (arg === "--help" || arg === "-h") {
   process.stdout.write(`${PACKAGE_NAME} ${VERSION} - MCP server (stdio) for SEC EDGAR + state business-entity data.
 
-Usage: npx -y ${PACKAGE_NAME}
+Usage: node dist/stdio.js   (from a clone of https://github.com/pgeneralpl/edgar-entity-mcp, after npm ci && npm run build)
 
 Environment:
   SEC_USER_AGENT            REQUIRED by SEC policy: "<Company/Name> <email>"

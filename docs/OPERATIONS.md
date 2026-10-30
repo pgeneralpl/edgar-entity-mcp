@@ -70,7 +70,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 
 **Reserve, then refund.** The table above is the *estimate* reserved before a call. After the call the server charges the actual cost — the number of upstream requests it made (and shared-cache bytes read), at least 1 — and refunds the rest. A call answered from cache usually costs 1 unit, so cheap cached calls cannot exhaust the shared anonymous budget.
 
-Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`), the limit, and a hint ending "Higher limits on the hosted endpoint may be requested by a person at <`KEY_REQUEST_URL`> (requests are reviewed manually and may be declined; please do not file automatically)." Degraded-mode refusals and the bad-key 429 carry no such link. Running locally via `npx -y edgar-entity-mcp` has no quota.
+Over-quota calls return a `RATE_LIMITED` tool error with `retry_after_seconds`, the scope (`minute`, `day`, `network`, `global`), the limit, and a hint ending "Higher limits on the hosted endpoint may be requested by a person at <`KEY_REQUEST_URL`> (requests are reviewed manually and may be declined; please do not file automatically)." Degraded-mode refusals and the bad-key 429 carry no such link. Running the server locally from source over stdio (`node dist/stdio.js`) has no quota.
 
 Fair share of the upstream budget: `SEC_KEYED_RESERVED_RPS` (2 of the 6 SEC requests/s by default) is reserved for API-key callers, and each client may have at most `MAX_CONCURRENT_UPSTREAM_PER_CLIENT` (4) upstream fetches in flight.
 
@@ -94,7 +94,7 @@ Size your Redis plan for your own quotas: request volume is bounded by the daily
 
 With Redis configured and `STATS_ENABLED` not `0`, the HTTP server keeps **aggregate** counters per UTC day (`src/core/stats.ts`). Every write sets `EXPIREAT` = end of that UTC day + **30 days**, so each key always has a TTL (no relative TTL that a later write could extend) and disappears 30 days after its day.
 
-**Where it runs.** Stats are recorded only when `VERCEL_ENV === "production"`, or when the server is not on Vercel at all (no `VERCEL` env var, i.e. self-hosted). Preview and development deployments on Vercel never write stats (and no longer have Redis at all; see the note in [Production configuration](#production-configuration)). **Self-hosted HTTP servers with Upstash configured have stats on by default**; set `STATS_ENABLED=false` to turn them off. stdio (`npx`) never records anything.
+**Where it runs.** Stats are recorded only when `VERCEL_ENV === "production"`, or when the server is not on Vercel at all (no `VERCEL` env var, i.e. self-hosted). Preview and development deployments on Vercel never write stats (and no longer have Redis at all; see the note in [Production configuration](#production-configuration)). **Self-hosted HTTP servers with Upstash configured have stats on by default**; set `STATS_ENABLED=false` to turn them off. stdio (`node dist/stdio.js`) never records anything.
 
 | Key | Type | Content |
 |---|---|---|

@@ -58,7 +58,7 @@ nav,footer{font-size:.875em}
         {
           "@type": "HowToStep",
           "name": "Connect the server",
-          "text": "Add https://edgar-entity-mcp.vercel.app/mcp (remote) or npx -y edgar-entity-mcp (stdio, with SEC_USER_AGENT) to your MCP client config."
+          "text": "Add https://edgar-entity-mcp.vercel.app/mcp (remote) to your MCP client config, or run the server locally from the GitHub source (stdio, with SEC_USER_AGENT)."
         },
         {
           "@type": "HowToStep",
@@ -187,7 +187,7 @@ nav,footer{font-size:.875em}
 <h2>What you need</h2>
 <ul>
 <li>An MCP-capable client: Claude Desktop, Claude Code, Cursor, Windsurf or VS Code (all listed in the project README).</li>
-<li><strong>Either</strong> nothing else, for the hosted remote endpoint, <strong>or</strong> Node.js to run the npm package locally over stdio. Use a current, patched Node.js: 22.23.4+ (22.x) or 24.22.1+ (24.x). The published npm version 0.1.0 declares <code>node &gt;=20</code>, but Node.js 20 is end-of-life and lacks the October 2026 security fixes. From 0.2.0 (not yet published) the package declares <code>24.x</code> (npm prints a harmless <code>EBADENGINE</code> notice on 22.x) and warns on startup when Node.js is unpatched.</li>
+<li><strong>Either</strong> nothing else, for the hosted remote endpoint (recommended), <strong>or</strong> Git and Node.js to run the server locally from the GitHub source over stdio. Use a current, patched Node.js: 22.23.4+ (22.x) or 24.22.1+ (24.x); the server warns on startup when Node.js is unpatched. The old npm package (0.1.0) is deprecated and no longer maintained; do not install it.</li>
 </ul>
 <h2>Step 1: Connect the server</h2>
 <h3>Option A: Hosted endpoint (no install, no key)</h3>
@@ -197,23 +197,28 @@ nav,footer{font-size:.875em}
 <p>If your client only speaks stdio, use the <code>mcp-remote</code> bridge:</p>
 <pre><code>{ &quot;mcpServers&quot;: { &quot;edgar-entity&quot;: { &quot;command&quot;: &quot;npx&quot;, &quot;args&quot;: [&quot;-y&quot;, &quot;mcp-remote&quot;, &quot;https://edgar-entity-mcp.vercel.app/mcp&quot;] } } }
 </code></pre>
-<h3>Option B: Local (stdio via npx)</h3>
+<h3>Option B: Run locally from the GitHub source (stdio)</h3>
+<pre><code>git clone https://github.com/pgeneralpl/edgar-entity-mcp.git
+cd edgar-entity-mcp
+npm ci &amp;&amp; npm run build
+</code></pre>
+<p>Then add it to your client's MCP config, using the absolute path of your clone:</p>
 <pre><code>{
   &quot;mcpServers&quot;: {
     &quot;edgar-entity&quot;: {
-      &quot;command&quot;: &quot;npx&quot;,
-      &quot;args&quot;: [&quot;-y&quot;, &quot;edgar-entity-mcp&quot;],
+      &quot;command&quot;: &quot;node&quot;,
+      &quot;args&quot;: [&quot;/absolute/path/to/edgar-entity-mcp/dist/stdio.js&quot;],
       &quot;env&quot;: { &quot;SEC_USER_AGENT&quot;: &quot;Your Name you@example.com&quot; }
     }
   }
 }
 </code></pre>
-<p>The SEC's fair-access policy asks automated clients to identify themselves, so set <code>SEC_USER_AGENT</code> to your name and a contact email.</p>
+<p>For local use, the SEC's fair-access policy asks automated clients to identify themselves, so set <code>SEC_USER_AGENT</code> to your name and a contact email.</p>
 <p>Where the config lives:</p>
 <ul>
 <li><strong>Claude Desktop:</strong> <code>~/Library/Application Support/Claude/claude_desktop_config.json</code> (macOS) or <code>%APPDATA%\Claude\claude_desktop_config.json</code> (Windows).</li>
 <li><strong>Cursor:</strong> <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project).</li>
-<li><strong>Claude Code:</strong> <code>claude mcp add edgar-entity -e SEC_USER_AGENT="Your Name you@example.com" -- npx -y edgar-entity-mcp</code></li>
+<li><strong>Claude Code:</strong> <code>claude mcp add --transport http edgar-entity https://edgar-entity-mcp.vercel.app/mcp</code> (hosted) or <code>claude mcp add edgar-entity -e SEC_USER_AGENT="Your Name you@example.com" -- node /absolute/path/to/edgar-entity-mcp/dist/stdio.js</code> (local)</li>
 <li><strong>VS Code:</strong> <code>.vscode/mcp.json</code>, using <code>"servers"</code> instead of <code>"mcpServers"</code>.</li>
 </ul>
 <p>Restart the client. You should see 10 tools from <code>edgar-entity</code>.</p>
@@ -275,7 +280,7 @@ nav,footer{font-size:.875em}
 </tr>
 </tbody>
 </table></div>
-<p><strong>Not covered:</strong> every other state, including Delaware, California, Florida and Texas. "Not found" therefore does <strong>not</strong> mean that an entity doesn't exist. The hosted endpoint does not return the names or addresses of registered agents who are individuals. npm 0.1.0 does not filter these fields; use 0.2.0 or later.</p>
+<p><strong>Not covered:</strong> every other state, including Delaware, California, Florida and Texas. "Not found" therefore does <strong>not</strong> mean that an entity doesn't exist. The hosted endpoint does not return the names or addresses of registered agents who are individuals. The deprecated npm package 0.1.0 does not filter these fields; do not use it.</p>
 <h2>A complete research prompt</h2>
 <blockquote>
 <p>"Research Newmont Corporation: find its CIK and industry, summarize the latest 10-K's business description in five bullets, show the last three fiscal years of revenue, net income and free cash flow with the XBRL tags used, list any Form 4 filings from the last 90 days with what each code means, and check its Colorado registration. Cite a source URL for every fact."</p>
@@ -287,7 +292,7 @@ nav,footer{font-size:.875em}
 <li>Usage is measured in units; a cached call usually costs 1 unit.</li>
 <li>Currently up to <strong>60 units per day per IP (shared networks may get less) and 30 per minute</strong>; limits may change without notice.</li>
 <li>Heavier tools cost more units (for example, Form 4 lookups and full documents).</li>
-<li>If you need more, run it locally over stdio with <code>npx -y edgar-entity-mcp</code> and set <code>SEC_USER_AGENT</code> to your own name and email. Local stdio use has no unit quotas (in both npm 0.1.0 and 0.2.0); self-hosted HTTP mode (<code>npm run start:http</code>, from 0.2.0) enforces quotas like the hosted endpoint. The local server still has to respect the SEC's fair-access limit (10 requests per second), so it throttles its SEC requests to 8 per second by default in 0.1.0 and 6 per second in 0.2.0 (<code>SEC_MAX_RPS</code>).</li>
+<li>If you need more, run it locally from the GitHub source over stdio (Option B above) and set <code>SEC_USER_AGENT</code> to your own name and email. Local stdio use has no unit quotas; self-hosted HTTP mode (<code>npm run start:http</code>) enforces quotas like the hosted endpoint. The local server still has to respect the SEC's fair-access limit (10 requests per second), so it throttles its SEC requests to 6 per second by default (<code>SEC_MAX_RPS</code>).</li>
 </ul>
 <h2>FAQ</h2>
 <p><strong>Is this free?</strong>
@@ -309,11 +314,10 @@ No. It is not investment, legal or financial advice. It returns public filings a
 <p><strong>How fresh is the data?</strong>
 EDGAR data is fetched from the SEC with short caches (about 10 minutes for filing lists, a few hours for XBRL facts). State datasets update on each state's own schedule, which <code>list_supported_states</code> reports.</p>
 <p><strong>Can I self-host it?</strong>
-Yes. <code>npm run build &amp;&amp; npm run start:http</code> runs the HTTP server locally, and the repo includes a Vercel deployment config. Self-hosted HTTP mode (from 0.2.0) enforces per-IP quotas like the hosted endpoint (defaults adjustable with the <code>QUOTA_*</code> environment variables); only local stdio use has no quotas. Set <code>SEC_USER_AGENT</code> to your own name and email.</p>
+Yes. <code>npm run build &amp;&amp; npm run start:http</code> runs the HTTP server locally, and the repo includes a Vercel deployment config. Self-hosted HTTP mode enforces per-IP quotas like the hosted endpoint (defaults adjustable with the <code>QUOTA_*</code> environment variables); only local stdio use has no quotas. Set <code>SEC_USER_AGENT</code> to your own name and email.</p>
 <h2>Links</h2>
 <ul>
 <li>Source (MIT): <a href="https://github.com/pgeneralpl/edgar-entity-mcp" rel="noopener">https://github.com/pgeneralpl/edgar-entity-mcp</a></li>
-<li>npm: <a href="https://www.npmjs.com/package/edgar-entity-mcp" rel="noopener">https://www.npmjs.com/package/edgar-entity-mcp</a></li>
 <li>Hosted endpoint: <a href="https://edgar-entity-mcp.vercel.app/mcp" rel="noopener">https://edgar-entity-mcp.vercel.app/mcp</a></li>
 <li>MCP Registry: <code>io.github.pgeneralpl/edgar-entity-mcp</code></li>
 <li>Privacy · Beta terms · Abuse contact: <a href="/privacy">https://edgar-entity-mcp.vercel.app/privacy</a> · <a href="/terms">/terms</a> · <a href="/abuse">/abuse</a></li>
