@@ -18,7 +18,7 @@
     {
       "name": "search_company",
       "title": "Search SEC registrants",
-      "description": "Find SEC-registered public companies by ticker or name (fuzzy). Returns CIK (the SEC id used by every other tool), name, tickers, exchange and a match score (100 = exact ticker). Source: SEC company_tickers_exchange.json (companies with a listed ticker).",
+      "description": "Find SEC-registered public companies by ticker or name. Matching ignores case, punctuation, '&' vs 'and' and legal suffixes (Inc/Inc./Corp/Corporation/Co/Company/LLC/Ltd...), tolerates typos ('Microsfot' -> Microsoft) and knows well-known former names (matched_former_name, e.g. 'Facebook' -> Meta Platforms). Returns CIK (the SEC id used by every other tool), name, tickers, exchange and a match score (100 = exact ticker, 97 = exact name, < 80 = fuzzy). With no match it returns did_you_mean suggestions. Source: SEC company_tickers_exchange.json (companies with a listed ticker only); private or non-SEC companies: use lookup_business_entity.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -27,7 +27,7 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "Ticker or company name, e.g. 'MSFT', 'berkshire', 'Tesla Inc'"
+            "description": "Ticker or company name, e.g. 'MSFT', 'berkshire', 'Tesla Inc', 'Johnson and Johnson'"
           },
           "limit": {
             "default": 5,
@@ -121,13 +121,13 @@
     {
       "name": "get_filing_document",
       "title": "Read a filing document",
-      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession`. Optionally extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Long text is paged: use max_chars and the returned next_offset.",
+      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession` (one of the two is required). Start with mode 'outline' for a long 10-K/10-Q: it returns no text, only the detected items (id, title, offset, chars) and total_chars, so you can then read just what you need. Extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Text is paged: max_chars (default 10,000) per call, then pass the returned next_offset as offset (offsets are relative to the section when `section` is set, else to the whole document).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
           "url": {
-            "description": "Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings)",
+            "description": "Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings). Either url, or company + accession, is required.",
             "type": "string",
             "maxLength": 500,
             "format": "uri"
@@ -139,9 +139,18 @@
             "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
           },
           "accession": {
-            "description": "Accession number, e.g. 0000320193-24-000123",
+            "description": "Accession number, e.g. 0000320193-24-000123 (with company)",
             "type": "string",
             "maxLength": 30
+          },
+          "mode": {
+            "default": "text",
+            "description": "'text' (default) returns a page of text; 'outline' returns only the item list with offsets and lengths (cheap way to plan reading a long filing)",
+            "type": "string",
+            "enum": [
+              "text",
+              "outline"
+            ]
           },
           "section": {
             "description": "Item id to extract, e.g. '1A', '7', 'Item 7A'",
@@ -149,13 +158,15 @@
             "maxLength": 10
           },
           "max_chars": {
-            "default": 20000,
+            "default": 10000,
+            "description": "Characters of text per call (500–100,000; default 10,000)",
             "type": "integer",
             "minimum": 500,
             "maximum": 100000
           },
           "offset": {
             "default": 0,
+            "description": "Start position (use next_offset, or an outline item's offset)",
             "type": "integer",
             "minimum": 0,
             "maximum": 20000000
@@ -166,7 +177,7 @@
     {
       "name": "get_financials",
       "title": "Normalized financials (XBRL)",
-      "description": "Key financial metrics normalized from SEC XBRL companyfacts, one row per fiscal period (deduped; as-filed values from the filing that reported the period). Metrics: revenue, gross_profit, operating_income, net_income, eps_basic, eps_diluted, operating_cash_flow, capex, total_assets, total_liabilities, stockholders_equity, cash, long_term_debt, shares_outstanding, free_cash_flow (derived). Revenue tries common tags in order (Revenues, RevenueFromContractWithCustomerExcludingAssessedTax, SalesRevenueNet, ...) and tags_used reports which was used. period_type 'quarterly' returns 3-month values (cash-flow quarters derived from YTD; Q4 derived as FY minus 9M). Values are raw (e.g. 391035000000 = $391.0B).",
+      "description": "Key financial metrics normalized from SEC XBRL companyfacts, one row per FISCAL period (fy/fp are the company's fiscal year and quarter, e.g. Microsoft FY2024 = 2023-07-01..2024-06-30; fiscal_year_end gives the MM-DD; deduped; as-filed values from the filing that reported the period). Metrics: revenue, gross_profit, operating_income, net_income, eps_basic, eps_diluted, operating_cash_flow, capex, total_assets, total_liabilities, stockholders_equity, cash, long_term_debt, shares_outstanding, free_cash_flow (derived); aliases accepted in metrics: revenues→revenue, sales→revenue, net_sales→revenue, total_revenue→revenue, turnover→revenue, net_profit→net_income, profit→net_income, earnings→net_income, net_earnings→net_income, eps→eps_diluted, diluted_eps→eps_diluted, basic_eps→eps_basic, operating_profit→operating_income, cfo→operating_cash_flow, cash_from_operations→operating_cash_flow, capital_expenditures→capex, fcf→free_cash_flow, assets→total_assets, liabilities→total_liabilities, equity→stockholders_equity, shareholders_equity→stockholders_equity, cash_and_equivalents→cash, debt→long_term_debt, shares→shares_outstanding. Each metric tries common tags in order (revenue: Revenues, RevenueFromContractWithCustomerExcludingAssessedTax, SalesRevenueNet, ...) and tags_used reports which was used. period_type 'quarterly' returns 3-month values (cash-flow quarters derived from YTD; Q4 derived as FY minus 9M). If a company has only 10-Q data (e.g. a recent IPO), annual results are empty and hint says to use 'quarterly'. Values are raw (e.g. 391035000000 = $391.0B).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -193,7 +204,8 @@
             "maximum": 20
           },
           "metrics": {
-            "description": "Subset of metrics to return (default all)",
+            "description": "Subset of metrics to return (default all); aliases such as sales, eps, fcf, equity are accepted",
+            "maxItems": 20,
             "type": "array",
             "items": {
               "type": "string",
@@ -212,7 +224,31 @@
                 "stockholders_equity",
                 "cash",
                 "long_term_debt",
-                "shares_outstanding"
+                "shares_outstanding",
+                "revenues",
+                "sales",
+                "net_sales",
+                "total_revenue",
+                "turnover",
+                "net_profit",
+                "profit",
+                "earnings",
+                "net_earnings",
+                "eps",
+                "diluted_eps",
+                "basic_eps",
+                "operating_profit",
+                "cfo",
+                "cash_from_operations",
+                "capital_expenditures",
+                "fcf",
+                "assets",
+                "liabilities",
+                "equity",
+                "shareholders_equity",
+                "cash_and_equivalents",
+                "debt",
+                "shares"
               ]
             }
           }
@@ -225,7 +261,7 @@
     {
       "name": "get_xbrl_concept",
       "title": "XBRL concept history",
-      "description": "All reported values of one XBRL concept for one company (SEC companyconcept API), newest first, deduped by period. Use for any tag not in get_financials, e.g. us-gaap:ResearchAndDevelopmentExpense, us-gaap:LongTermDebt, dei:EntityCommonStockSharesOutstanding. framed_only=true keeps only SEC's one-fact-per-calendar-period values (cleanest time series).",
+      "description": "All reported values of one XBRL concept for one company (SEC companyconcept API), newest first, deduped by period. Use for any tag not in get_financials, e.g. us-gaap:ResearchAndDevelopmentExpense, us-gaap:LongTermDebt, dei:EntityCommonStockSharesOutstanding. Tag case is corrected automatically (tag_corrected_from); an unknown tag returns NOT_FOUND with did_you_mean (tags this company reports). 10-Q facts mix 3-month and year-to-date values: pass duration ('annual', 'quarterly', 'ytd', 'instant') for one series; each fact carries its duration. fy/fp are the filing's fiscal year/period. framed_only=true keeps only SEC's one-fact-per-calendar-period values.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -240,7 +276,8 @@
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "Concept name, case-sensitive, e.g. 'ResearchAndDevelopmentExpense'. 'us-gaap:Tag' form also accepted."
+            "pattern": "^([a-z-]+:)?[A-Za-z_][A-Za-z0-9_.-]*$",
+            "description": "Concept name, e.g. 'ResearchAndDevelopmentExpense' (case is corrected if needed). 'us-gaap:Tag' form also accepted."
           },
           "taxonomy": {
             "default": "us-gaap",
@@ -270,6 +307,18 @@
             "default": false,
             "type": "boolean"
           },
+          "duration": {
+            "default": "any",
+            "description": "annual (≈1 year), quarterly (≈3 months), ytd (6/9-month year-to-date), instant (balance-sheet date), or any",
+            "type": "string",
+            "enum": [
+              "any",
+              "annual",
+              "quarterly",
+              "ytd",
+              "instant"
+            ]
+          },
           "limit": {
             "default": 20,
             "type": "integer",
@@ -286,16 +335,58 @@
     {
       "name": "compare_companies",
       "title": "Cross-company comparison (XBRL frames)",
-      "description": "Compare one XBRL concept across ALL reporting companies for a calendar period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, required for balance-sheet items like Assets). Pass companies to filter to specific tickers/CIKs; otherwise returns the top `limit` by value.",
+      "description": "Compare one financial metric or XBRL concept across ALL reporting companies for a CALENDAR period (SEC frames API), e.g. rank by revenue for CY2024, or compare specific companies. Pass metric (revenue, gross_profit, operating_income, net_income, eps_basic, eps_diluted, operating_cash_flow, capex, total_assets, total_liabilities, stockholders_equity, cash, long_term_debt; aliases like sales, eps, assets) to fall back across the common tags for it (revenue: Revenues > RevenueFromContractWithCustomerExcludingAssessedTax > SalesRevenueNet), with the tag used per company; or pass tag for one exact concept. Period: CY2024 (annual duration), CY2024Q2 (quarter), CY2024Q4I (instant, for balance-sheet items; added automatically for balance-sheet metrics). Calendar basis: each filer's ~1-year (or ~3-month) period that best fits the calendar period, so CY2024 for Microsoft is its fiscal year ending 2024-06-30 (flagged fiscal_period_differs); use get_financials for fiscal years. accn is the latest filing reporting the value. Pass companies to filter to specific tickers/CIKs (exact or prefix names also work, without typo correction; unresolved items are listed in `unresolved`); otherwise returns the top `limit` by value.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
+          "metric": {
+            "description": "Normalized metric with tag fallback, e.g. 'revenue', 'net_income', 'eps_diluted', 'total_assets'. Use instead of tag.",
+            "type": "string",
+            "enum": [
+              "revenue",
+              "gross_profit",
+              "operating_income",
+              "net_income",
+              "eps_basic",
+              "eps_diluted",
+              "operating_cash_flow",
+              "capex",
+              "total_assets",
+              "total_liabilities",
+              "stockholders_equity",
+              "cash",
+              "long_term_debt",
+              "revenues",
+              "sales",
+              "net_sales",
+              "total_revenue",
+              "turnover",
+              "net_profit",
+              "profit",
+              "earnings",
+              "net_earnings",
+              "eps",
+              "diluted_eps",
+              "basic_eps",
+              "operating_profit",
+              "cfo",
+              "cash_from_operations",
+              "capital_expenditures",
+              "assets",
+              "liabilities",
+              "equity",
+              "shareholders_equity",
+              "cash_and_equivalents",
+              "debt"
+            ]
+          },
           "tag": {
+            "description": "Exact XBRL tag, e.g. 'Revenues', 'NetIncomeLoss', 'Assets' (case-sensitive). Use instead of metric.",
             "type": "string",
             "minLength": 1,
             "maxLength": 200,
-            "description": "e.g. 'Revenues', 'NetIncomeLoss', 'Assets'"
+            "pattern": "^([a-z-]+:)?[A-Za-z_][A-Za-z0-9_.-]*$"
           },
           "period": {
             "type": "string",
@@ -305,6 +396,7 @@
           },
           "taxonomy": {
             "default": "us-gaap",
+            "description": "For tag only",
             "type": "string",
             "enum": [
               "us-gaap",
@@ -314,8 +406,7 @@
             ]
           },
           "unit": {
-            "default": "USD",
-            "description": "USD, USD-per-shares, shares, pure",
+            "description": "USD (default), USD-per-shares, shares, pure. With metric, defaults to the metric's unit",
             "type": "string",
             "maxLength": 40
           },
@@ -324,7 +415,9 @@
             "maxItems": 25,
             "type": "array",
             "items": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40
             }
           },
           "order": {
@@ -343,7 +436,6 @@
           }
         },
         "required": [
-          "tag",
           "period"
         ]
       }
@@ -407,22 +499,21 @@
     {
       "name": "lookup_business_entity",
       "title": "State business-entity registry lookup",
-      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are withheld on the hosted endpoint; automated classification), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names. Call list_supported_states for coverage and licenses.",
+      "description": "Search Secretary of State business-entity registries (official open data) by entity name and/or state entity id. Supported: NY, CO, OR, CT, PA (NY, OR and PA list active entities only; CO and CT include dissolved entities with status). Name matching ignores case, punctuation, '&' vs 'and' and legal-suffix spelling (Inc/Inc./Incorporated, Co/Company, LLC/L.L.C.); results are ranked exact > prefix > other matches, active entities first within each tier. Paginate per state with limit/offset (has_more, next_offset; total when include_total=true or on the last page). Returns normalized name, entity id, status, type, formation date, jurisdiction, principal/mailing address, registered agent where available (organizational agents only; individual/natural-person agents are withheld on the hosted endpoint; automated classification), and source URLs. Use for private companies, subsidiaries, LLCs, and verifying legal entity names; for SEC-listed companies use search_company. Call list_supported_states for coverage and licenses.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
           "name": {
-            "description": "Entity name or fragment, e.g. 'Tiffany and Company'",
+            "description": "Entity name or fragment, e.g. 'Tiffany & Co.' (also matches 'TIFFANY AND COMPANY')",
             "type": "string",
             "minLength": 2,
-            "maxLength": 200
+            "maxLength": 100
           },
           "entity_id": {
             "description": "State entity id (NY DOS ID, CO entity id, OR registry number, CT account number, PA filing number). Usually combine with a single state.",
             "type": "string",
-            "minLength": 1,
-            "maxLength": 40
+            "pattern": "^[A-Za-z0-9-]{1,40}$"
           },
           "states": {
             "description": "Default: all supported states",
@@ -455,10 +546,22 @@
           },
           "limit": {
             "default": 5,
-            "description": "Max results per state",
+            "description": "Max results per state (page size)",
             "type": "integer",
             "minimum": 1,
             "maximum": 25
+          },
+          "offset": {
+            "default": 0,
+            "description": "Skip this many results per state (pagination; use next_offset from the previous page). Max 500 (100 without an API key on the hosted server); pages after the first count one extra quota unit.",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 500
+          },
+          "include_total": {
+            "default": false,
+            "description": "Also count all matches per state (one extra registry request per state; doubles the quota cost).",
+            "type": "boolean"
           },
           "include_agent_details": {
             "default": false,

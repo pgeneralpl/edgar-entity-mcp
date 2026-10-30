@@ -67,7 +67,7 @@
   "tools": [
     {
       "name": "search_company",
-      "description": "Find SEC-registered public companies by ticker or name (fuzzy)"
+      "description": "Find SEC-registered public companies by ticker or name"
     },
     {
       "name": "get_company_profile",
@@ -83,7 +83,7 @@
     },
     {
       "name": "get_financials",
-      "description": "Key financial metrics normalized from SEC XBRL companyfacts, one row per fiscal period (deduped; as-filed values from the filing that reported the period)"
+      "description": "Key financial metrics normalized from SEC XBRL companyfacts, one row per FISCAL period (fy/fp are the company's fiscal year and quarter, e.g"
     },
     {
       "name": "get_xbrl_concept",
@@ -91,7 +91,7 @@
     },
     {
       "name": "compare_companies",
-      "description": "Compare one XBRL concept across ALL reporting companies for a calendar period (SEC frames API), e.g"
+      "description": "Compare one financial metric or XBRL concept across ALL reporting companies for a CALENDAR period (SEC frames API), e.g"
     },
     {
       "name": "get_insider_trades",
