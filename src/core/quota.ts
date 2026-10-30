@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { LRUCache } from "lru-cache";
 import type { Redis } from "@upstash/redis";
-import { config } from "../config.js";
+import { config, higherLimitsHint } from "../config.js";
 import { ToolError, logError } from "./errors.js";
 import { getRedis } from "./cache.js";
 import { markRedisDegraded, redisDegraded } from "./degraded.js";
 import { currentContext } from "./context.js";
+import { frameTagsFor } from "../sec/metricAliases.js";
 
 /**
  * Per-client quotas for the hosted HTTP endpoint, in "units" that approximate upstream cost
@@ -68,15 +69,21 @@ export function toolCost(tool: string, args: unknown): number {
       return 0;
     case "search_company":
     case "get_company_profile":
-    case "get_xbrl_concept":
       return 1;
+    case "get_xbrl_concept":
+      // companyconcept; an unknown / mis-cased tag falls back to companyfacts (large, cached) once
+      return 3;
     case "list_filings":
       // tickers + submissions + up to LIST_MAX_HISTORY_PAGES (4) older-history pages
       return a.date_from || a.date_to || num(a.offset, 0) > 0 ? 6 : 1;
     case "get_financials":
       return 2; // companyfacts is a large document
     case "compare_companies":
-      return 3; // frames responses cover every filer
+      // Realistic maximum, reserved up front: one frame request per tag tried (metric mode: ≤ 3
+      // fallback tags; tag mode: 1) plus 1 for resolving `companies` (tickers file). Frames are
+      // capped at 256 KiB in Redis, so cached reads stay within the same count. Settlement
+      // (settleQuota) still refunds what a call did not use, e.g. when a company filter stops early.
+      return (typeof a.metric === "string" ? Math.max(1, frameTagsFor(a.metric).length) : 1) + 1;
     case "get_filing_document":
       // url: document + up to 3 redirects; company+accession adds tickers, submissions and up to 4 history pages
       return a.url ? 4 : 10;
@@ -355,13 +362,13 @@ export function rateLimitedError(p: Principal, d: QuotaDecision, cost: number): 
     return new ToolError(
       "RATE_LIMITED",
       `The shared daily budget for anonymous use of this server is spent (${d.limit} units across all anonymous clients), and this IP has used its ${c.quota.anonTricklePerDay}-unit fallback allowance. This call costs ${cost} unit(s).`,
-      `Retry after ${d.retryAfterSeconds}s (UTC midnight), request a free API key at ${c.keyRequestUrl}, or run the server locally with \`npx -y edgar-entity-mcp\`.`,
+      `Retry after ${d.retryAfterSeconds}s (UTC midnight), or run the server locally with \`npx -y edgar-entity-mcp\`. ${higherLimitsHint(c.keyRequestUrl)}`,
       { retry_after_seconds: d.retryAfterSeconds, scope: d.scope, limit: d.limit, cost },
     );
   const hint =
     p.tier === "anon"
-      ? `Retry after ${d.retryAfterSeconds}s. For a higher quota, request a free API key at ${c.keyRequestUrl} and send it as "Authorization: Bearer <key>" (or "x-api-key"). Or run the server locally with \`npx -y edgar-entity-mcp\` (no quota; set SEC_USER_AGENT to your own name + email).`
-      : `Retry after ${d.retryAfterSeconds}s. Need more? Ask at ${c.keyRequestUrl}, or self-host with \`npx -y edgar-entity-mcp\`.`;
+      ? `Retry after ${d.retryAfterSeconds}s, or run the server locally with \`npx -y edgar-entity-mcp\` (no quota; set SEC_USER_AGENT to your own name + email). ${higherLimitsHint(c.keyRequestUrl)}`
+      : `Retry after ${d.retryAfterSeconds}s, or self-host with \`npx -y edgar-entity-mcp\`. ${higherLimitsHint(c.keyRequestUrl)}`;
   return new ToolError("RATE_LIMITED", `Rate limit reached: ${d.limit} units per ${per} for ${who}. This call costs ${cost} unit(s).`, hint, {
     retry_after_seconds: d.retryAfterSeconds,
     scope: d.scope,

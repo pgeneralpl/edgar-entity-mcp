@@ -14,7 +14,7 @@ function headersFor(path: string): Record<string, string> {
   return out;
 }
 
-const HTML_PATHS = ["/", "/index", "/privacy", "/terms", "/abuse", "/index.html", "/privacy.html", "/terms.html", "/abuse.html"];
+const HTML_PATHS = ["/", "/index", "/privacy", "/terms", "/abuse", "/index.html", "/privacy.html", "/terms.html", "/abuse.html", "/guides/sec-edgar-mcp", "/guides/sec-edgar-mcp.html"];
 const NON_HTML = ["/mcp", "/api/mcp", "/health", "/api/health", "/.well-known/mcp/server-card.json", "/stats"];
 
 describe("vercel.json security headers", () => {
