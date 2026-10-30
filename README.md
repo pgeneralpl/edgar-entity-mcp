@@ -127,7 +127,7 @@ Quick check: `npx -y edgar-entity-mcp --version`
 
 ### Remote (Streamable HTTP)
 
-Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses Upstash Redis for a shared cache, a fleet-wide SEC budget of 6 req/s, and per-client quotas (see [Hosted limits](#hosted-limits)).
+Hosted endpoint (free, no key needed): `https://edgar-entity-mcp.vercel.app/mcp` · health: https://edgar-entity-mcp.vercel.app/health. The hosted instance uses a shared cache, stays well below the SEC fair-access rate, and applies per-client quotas (see [Hosted limits](#hosted-limits)).
 
 ```json
 { "mcpServers": { "edgar-entity": { "url": "https://edgar-entity-mcp.vercel.app/mcp" } } }
@@ -154,24 +154,24 @@ The repo already contains `api/mcp.ts` and `api/health.ts` (Vercel Functions wit
 
 ## Hosted limits
 
-The hosted endpoint is a free beta with low limits. Anonymous clients get **60 units per day per IP and 30 per minute**, within shared daily budgets per network and for all anonymous use; most calls cost 1–3 units and a call answered from cache costs 1. Over-quota calls return a `RATE_LIMITED` error with `retry_after_seconds`. Running locally via `npx -y edgar-entity-mcp` has no quota. Need higher limits? Open an issue: https://github.com/pgeneralpl/edgar-entity-mcp/issues
+The hosted endpoint is a free beta with low limits. Anonymous clients get **up to 60 units per day per IP (shared networks may get less) and 30 per minute**, within shared daily budgets per network and for all anonymous use; most calls cost 1–3 units and a call answered from cache usually costs 1. Over-quota calls return a `RATE_LIMITED` error with `retry_after_seconds`. Running locally via `npx -y edgar-entity-mcp` has no quota. Higher limits on the hosted endpoint may be requested by a person via the [GitHub issue form](https://github.com/pgeneralpl/edgar-entity-mcp/issues/new?template=higher-limits.yml) (reviewed manually, may be declined; please do not file automatically).
 
 Other limits on the HTTP endpoint: 64 KB request bodies, no JSON-RPC batches (one message per request), at most 20 Form 4 filings per insider call and 5 states / 25 results per state per entity lookup, filing documents up to 15 MB.
 
-Environment variables, unit costs per tool, quota internals, the Upstash and Redis budgets, and the production configuration are documented for operators and self-hosters in [docs/OPERATIONS.md](docs/OPERATIONS.md).
+Environment variables and their defaults, unit costs per tool, quotas, Redis settings and the deployment configuration are documented for operators and self-hosters in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Privacy and personal data
 
 The hosted server's [Privacy Policy](https://edgar-entity-mcp.vercel.app/privacy) ([source](public/privacy.html)), [Beta terms](https://edgar-entity-mcp.vercel.app/terms) ([source](public/terms.html)) and [Contact & Abuse](https://edgar-entity-mcp.vercel.app/abuse) ([source](public/abuse.html)) pages are served from `public/`. The only contact is patryk.general@mail.grokbot.com.
 
 - Registered agents and service-of-process contacts are treated as **individuals unless the name ends with a legal-form suffix** (Inc, Corp, LLC, LLP, LP, Ltd, Company, "& Co", Bank, N.A., …) or is a known registered-agent service (CT Corporation, CSC, Cogency Global, …). "JOHN CHURCH", "JUDE LAW", "DAVID CO" and "JOHN SMITH PA" are individuals; ambiguous CO/PA/PC endings count as individual.
-- Individual agents are returned as `{ "kind": "individual", "withheld": true }`, and the entity's principal/mailing addresses (and NY location name) are withheld too (`addresses_withheld: true`), since for one-person businesses these are often a home address. `include_agent_details: true` reveals them in local stdio use; anonymous callers of the hosted endpoint get a privacy note instead. Organizational agents are always shown.
+- Individual agents are returned as `{ "kind": "individual", "withheld": true }`, and the entity's principal/mailing addresses (and NY location name) are withheld too (`addresses_withheld: true`), since for one-person businesses these are often a home address. **The hosted endpoint always withholds them** (`include_agent_details` is ignored there and the response carries a privacy note). The person/organization split is an automated classification; [contact us](https://edgar-entity-mcp.vercel.app/abuse) to suppress any we miss. `include_agent_details: true` reveals them only in local stdio use, or on a self-hosted HTTP server whose operator opts in with `ALLOW_PERSON_AGENT_DETAILS=1` (ignored on Vercel; see [Environment variables](docs/OPERATIONS.md#environment-variables)). Organizational agents are always shown.
 - Erasure/objection requests: add `entity:<STATE>:<id>` or `agent:<name>` with `npx tsx scripts/suppress.ts add ...` (Redis set, picked up within 10 minutes), `SUPPRESSION_FILE`, or `src/states/suppression-list.ts`. Entity ids are normalized (case, punctuation, leading zeros). A suppressed name is matched as whole words in agent names and addresses **and** in the entity name, NY location name and principal/mailing addresses; any hit removes every personal field of that record, and a hit in the entity name (also matched with spaces removed, e.g. "JANEDOE HOLDINGS LLC") replaces the name with `[withheld]`. If Redis is configured but the suppression list cannot be loaded on a cold instance, state lookups are refused (before any registry request) rather than served without it.
 - Form 4 reporting-owner names are statutory public disclosures and are returned by `get_insider_trades`.
 
 ### What the hosted server stores, and for how long
 
-- Rate limiting keeps **only integer counters** in Redis, under identifiers hashed with a salt that rotates daily, expiring 25 h after the UTC day they count; per-minute limits stay in process memory.
+- Rate limiting keeps **only integer counters** in Redis, under identifiers hashed with a salt that rotates daily, expiring 25 h after the UTC day they count; per-minute limits are never written to Redis.
 - Not stored anywhere in Redis: raw IPs, user agents, request paths, tool arguments, per-tool usage history. Shared cache entries hold public SEC and state data under hashed key names and expire after at most 24 h.
 - Aggregate usage statistics (per-day counts per tool, outcome and error code, allowlisted client-software labels, an approximate unique-client count) are kept for 30 days after each UTC day; no per-client records. They are on by default on production and self-hosted HTTP servers with Redis (`STATS_ENABLED=0` turns them off) and readable only through `GET /stats` with `STATS_SECRET`.
 - Logs (errors, and optional per-call usage lines with a daily-rotating hash) go to Vercel runtime logs under Vercel's plan retention; tool arguments and raw IPs are never logged by this server.

@@ -6,9 +6,9 @@ Repo: https://github.com/pgeneralpl/edgar-entity-mcp · Live endpoint: `https://
 
 1. ~~`gh repo create pgeneralpl/edgar-entity-mcp --public --source . --push`~~ (done)
 2. ~~Set owner `pgeneralpl` in `package.json` (`mcpName`, `repository`, `homepage`, `bugs`), `server.json`, `manifest.json` and this file~~ (done)
-3. ~~`npm publish --access public`~~ (done: https://www.npmjs.com/package/edgar-entity-mcp, v0.1.0, published 2026-10-20 with a one-off bypass-2FA token that was revoked right after). The account still has no 2FA; add a passkey/security key at https://www.npmjs.com/settings/pgeneralpl/tfa.
-4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`; GitHub auto-deploy and the free Upstash Redis store are connected). Before launch: merge the security-hardening PR (quotas, fail-closed limiter), set `HEALTH_SECRET` and `IP_HASH_SALT`, enable eviction + usage alerts in the Upstash console, and register a `SOCRATA_APP_TOKEN`.
-5. Future releases: bump the version in `package.json` and `server.json` (both places), commit, then `gh release create vX.Y.Z`. `.github/workflows/release.yml` publishes to npm via Trusted Publishing and to the MCP Registry via GitHub OIDC (after the one-time `npm trust github …` setup noted in that file). **Still open:** the npm Trusted Publisher must be added in the web UI (https://www.npmjs.com/package/edgar-entity-mcp/access → Trusted Publisher → GitHub Actions: owner `pgeneralpl`, repo `edgar-entity-mcp`, workflow `release.yml`); the CLI (`npm trust`) is refused for accounts/tokens without 2FA.
+3. ~~`npm publish --access public`~~ (done: https://www.npmjs.com/package/edgar-entity-mcp, v0.1.0, published 2026-10-20).
+4. ~~Deploy: `vercel link && vercel env add SEC_USER_AGENT && vercel deploy --prod`~~ (done, live at `https://edgar-entity-mcp.vercel.app/mcp`; GitHub auto-deploy and the Upstash Redis store are connected). Production configuration: see [docs/OPERATIONS.md](docs/OPERATIONS.md#production-configuration).
+5. Future releases: bump the version in `package.json` and `server.json` (both places), commit, then `gh release create vX.Y.Z`. `.github/workflows/release.yml` publishes to npm via Trusted Publishing and to the MCP Registry via GitHub OIDC (after the one-time `npm trust github …` setup noted in that file). **Still open:** the npm Trusted Publisher must be added in the web UI (https://www.npmjs.com/package/edgar-entity-mcp/access → Trusted Publisher → GitHub Actions: owner `pgeneralpl`, repo `edgar-entity-mcp`, workflow `release.yml`).
 6. ~~MCP Registry (first release)~~ (done: `io.github.pgeneralpl/edgar-entity-mcp` 0.1.0, active).
 7. Submit the listings below. For Smithery, use URL publishing: smithery.ai/new → `https://edgar-entity-mcp.vercel.app/mcp`. A static server card is served at `/.well-known/mcp/server-card.json`. Smithery has moved to URL publishing for remote servers and MCPB bundles for local ones, so no `smithery.yaml` is included.
 
@@ -37,7 +37,7 @@ Responses are compact JSON with source URLs. The server respects SEC fair-access
 **Tagline:** Research any US company from SEC EDGAR and state registries, with sources included.
 **Description:**
 Ten read-only tools for analysts, founders and researchers: `search_company`, `get_company_profile`, `list_filings`, `get_filing_document` (10-K item extraction), `get_financials` (normalized XBRL), `get_xbrl_concept`, `compare_companies` (SEC frames), `get_insider_trades` (Form 4), `lookup_business_entity` (NY/CO/OR/CT/PA) and `list_supported_states`. There is also a `company_research_brief` prompt. No data API keys are needed.
-**Config:** optional `x-api-key` header, if the hosted plan is enabled.
+**Config:** none needed for the hosted endpoint; set `SEC_USER_AGENT` when running locally.
 
 ## PulseMCP
 
@@ -80,7 +80,7 @@ Feedback and state requests welcome 🙏
 
 ## Indie Hackers post
 
-**Title:** I built a vertical MCP server for US company research. Here's the plan to monetize it
+**Title:** I built a free, open-source MCP server for US company research
 
 **Body:**
 AI agents are good at reasoning about companies and bad at getting facts about them. Ask one for Apple's FY2025 free cash flow, or whether a Colorado LLC is in good standing, and you usually get a guess.
@@ -94,17 +94,10 @@ So I built **edgar-entity-mcp**, an MCP server that connects agents to official 
 
 **Data licensing was step one.** I only enabled states whose open data permits commercial reuse. NY uses the OPEN-NY terms. CO, CT and PA are public domain, with CO requiring a disclaimer. Oregon is public domain by statute. All of it is documented in the repo.
 
-**Business model (not live yet):**
-- Free: the npm package (stdio) and a keyless hosted endpoint with caching
-- Pro: API key, higher rate limits, bulk exports, more states
-
-(Note: Vercel Hobby is for non-commercial use; move the project to Vercel Pro before charging.)
-- Team: webhooks for new filings and insider trades on a watchlist
-
-The code already has the hook points: API-key verification on the HTTP endpoint and before/after call hooks for metering.
+**It's a free hobby project:** the npm package (stdio, MIT) and a keyless hosted endpoint with caching and low limits. There are no paid plans.
 
 **Stack:** TypeScript, the official MCP SDK v2, zod, Vercel's `mcp-handler`, and Upstash Redis for a shared cache and a fleet-wide SEC rate budget.
 
-I'd love feedback on two questions: which states or data would you pay for, and would you rather pay per call or per seat?
+I'd love feedback: which states or data would be most useful to you?
 
 Repo: github.com/pgeneralpl/edgar-entity-mcp
