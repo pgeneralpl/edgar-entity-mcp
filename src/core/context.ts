@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Principal } from "./quota.js";
+import { config } from "../config.js";
 
 /** Per-tool-call context (who is calling), used for upstream budget shares and per-client fetch caps. */
 export interface CallContext {
@@ -36,4 +37,18 @@ export function callerIsTrusted(): boolean {
 export function callerIsAnonymous(): boolean {
   const c = als.getStore();
   return !!c && c.transport === "http" && c.principal?.tier !== "key";
+}
+
+/**
+ * Natural-person registered-agent names/addresses (include_agent_details) are never returned by the hosted
+ * endpoint (Vercel), whatever API key is sent. They are available only:
+ * - in local stdio use, and
+ * - on a self-hosted HTTP server whose operator set ALLOW_PERSON_AGENT_DETAILS=1, to verified API-key callers.
+ */
+export function personAgentDetailsAllowed(): boolean {
+  const cfg = config();
+  if (cfg.onVercel) return false;
+  const c = als.getStore();
+  if (!c || c.transport === "stdio") return true;
+  return cfg.allowPersonAgentDetails && callerIsTrusted();
 }

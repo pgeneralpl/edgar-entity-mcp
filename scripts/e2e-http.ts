@@ -79,13 +79,15 @@ try {
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
   });
-  check(noKey.status === 401, `no key -> 401 (got ${noKey.status})`);
+  const noKeyHint = ((await noKey.json()) as { error?: { data?: { hint?: string } } }).error?.data?.hint ?? "";
+  check(noKey.status === 401 && /A person may request one at https:\/\/github\.com\/.*template=higher-limits\.yml/.test(noKeyHint), `no key -> 401 with request hint (got ${noKey.status})`);
   const badKey = await fetch(`http://localhost:${port + 1}/mcp`, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json, text/event-stream", authorization: "Bearer wrong" },
     body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
   });
-  check(badKey.status === 401, `bad key -> 401 (got ${badKey.status})`);
+  const badKeyHint = ((await badKey.json()) as { error?: { data?: { hint?: string } } }).error?.data?.hint ?? "";
+  check(badKey.status === 401 && /reviewed manually/.test(badKeyHint) && /template=higher-limits\.yml/.test(badKeyHint), `bad key -> 401 with higher-limits hint (got ${badKey.status})`);
   const client = new Client({ name: "e2e-http-key", version: "0.0.0" });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(`http://localhost:${port + 1}/mcp`), { requestInit: { headers: { "x-api-key": "test-key-123" } } }),
@@ -108,7 +110,7 @@ try {
   const err = (b.data.error ?? b.data) as { code?: string; retry_after_seconds?: number; hint?: string; details?: { retry_after_seconds?: number } };
   console.log("  sample:", snip(b.data, 400));
   const retry = err.retry_after_seconds ?? err.details?.retry_after_seconds;
-  check(b.isError && err.code === "RATE_LIMITED" && typeof retry === "number" && retry >= 1 && /API key/i.test(JSON.stringify(b.data)), `over budget -> RATE_LIMITED, retry after ${retry}s (>= 1), key hint`);
+  check(b.isError && err.code === "RATE_LIMITED" && typeof retry === "number" && retry >= 1 && /issues\/new\?template=higher-limits\.yml/.test(JSON.stringify(b.data)) && /reviewed manually/.test(JSON.stringify(b.data)), `over budget -> RATE_LIMITED, retry after ${retry}s (>= 1), higher-limits issue hint`);
   await client.close();
 } finally {
   srv.kill();

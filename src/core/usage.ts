@@ -1,13 +1,13 @@
 /**
- * Usage / monetization hook point.
+ * Per-call usage hook point.
  *
- * Nothing is billed today. A hosting layer (e.g. the Vercel deployment) can register
- * hooks to enforce API keys, quotas, or pay-per-call metering:
+ * A hosting layer (e.g. a self-hosted deployment) can register hooks for access control,
+ * custom quotas, or its own metering and logging:
  *
  *   import { setUsageHooks } from "edgar-entity-mcp";
  *   setUsageHooks({
- *     beforeCall: async (e) => { if (!(await hasCredits(e.apiKey))) throw new Error("Out of credits"); },
- *     afterCall: async (e) => meter(e.apiKey, e.tool, e.ok),
+ *     beforeCall: async (e) => { if (!(await isAllowed(e.apiKey))) throw new Error("Not allowed"); },
+ *     afterCall: async (e) => record(e.tool, e.ok, e.ms),
  *   });
  *
  * Throwing a ToolError from beforeCall (e.g. RATE_LIMITED) rejects the call with that error;
@@ -28,7 +28,7 @@ export interface UsageResult extends UsageEvent {
   ok: boolean;
   ms: number;
   errorCode?: string;
-  /** Approximate response size; handy for per-token pricing. */
+  /** Approximate response size in characters: the JSON text, counted twice when the same JSON is also sent as structuredContent. */
   responseChars: number;
 }
 
