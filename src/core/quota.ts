@@ -9,6 +9,7 @@ import { currentContext } from "./context.js";
 import { statesBeyondWindow } from "../states/socrata.js";
 import { SUPPORTED_STATES } from "../states/registry.js";
 import { frameTagsFor } from "../sec/metricAliases.js";
+import { filingInputIsDocument } from "../sec/filingRef.js";
 
 /**
  * Per-client quotas for the hosted HTTP endpoint, in "units" that approximate upstream cost
@@ -87,8 +88,9 @@ export function toolCost(tool: string, args: unknown): number {
       // (settleQuota) still refunds what a call did not use, e.g. when a company filter stops early.
       return (typeof a.metric === "string" ? Math.max(1, frameTagsFor(a.metric).length) : 1) + 1;
     case "get_filing_document":
-      // url: document + up to 3 redirects; company+accession adds tickers, submissions and up to 4 history pages
-      return a.url ? 4 : 10;
+      // A document url: the document + up to 3 redirects. Anything that names a filing (accession,
+      // index page, folder) adds tickers, submissions and up to 4 history pages.
+      return filingInputIsDocument(a) ? 4 : 10;
     case "get_insider_trades":
       // tickers + submissions + up to 4 history pages + one Form 4 per filing (max 20)
       return 6 + Math.min(Math.max(1, Math.floor(num(a.limit, 10))), 20);

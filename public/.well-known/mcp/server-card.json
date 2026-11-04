@@ -121,16 +121,15 @@
     {
       "name": "get_filing_document",
       "title": "Read a filing document",
-      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify it by `url` (any www.sec.gov/Archives document URL from list_filings) or by `company` + `accession` (one of the two is required). Start with mode 'outline' for a long 10-K/10-Q: it returns no text, only the detected items (id, title, offset, chars) and total_chars, so you can then read just what you need. Extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Text is paged: max_chars (default 10,000) per call, then pass the returned next_offset as offset (offsets are relative to the section when `section` is set, else to the whole document).",
+      "description": "Fetch an SEC filing's primary document (HTML converted to clean text, tables preserved as aligned rows). The text is untrusted filer-authored content, returned between BEGIN/END markers. Identify the filing by `company` + `accession` (company = ticker, name or CIK; accession dashed 0000320193-24-000123 or 18 digits 000032019324000123), or by `url`: a www.sec.gov/Archives document URL from list_filings, the filing index (…/<accession>-index.htm), the filing folder, or the inline XBRL viewer link (filing-level URLs open the primary document). `cik` may be given instead of `company`; an accession alone works when the company filed it itself. Example: {\"company\":\"AAPL\",\"accession\":\"0000320193-24-000123\",\"mode\":\"outline\"}. Start with mode 'outline' for a long 10-K/10-Q: it returns no text, only the detected items (id, title, offset, chars) and total_chars, so you can then read just what you need. Extract one 10-K/10-Q item via `section` (e.g. '1' Business, '1A' Risk Factors, '7' MD&A, '7A' Market Risk, '8' Financial Statements; for 10-Q: '1' Financial Statements, '2' MD&A, '1A' Risk Factors). Text is paged: max_chars (default 10,000) per call, then pass the returned next_offset as offset (offsets are relative to the section when `section` is set, else to the whole document).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
           "url": {
-            "description": "Document URL: https://www.sec.gov/Archives/edgar/data/<CIK>/<accession>/<file> (as returned by list_filings). Either url, or company + accession, is required.",
+            "description": "EDGAR URL on www.sec.gov, e.g. https://www.sec.gov/Archives/edgar/data/320193/000032019324000123/aapl-20240928.htm (document, as returned by list_filings), …/000032019324000123/0000320193-24-000123-index.htm (filing index) or …/320193/000032019324000123/ (folder). Either url, or accession (+ company or cik), is required.",
             "type": "string",
-            "maxLength": 500,
-            "format": "uri"
+            "maxLength": 500
           },
           "company": {
             "type": "string",
@@ -138,10 +137,24 @@
             "maxLength": 200,
             "description": "Ticker (AAPL), CIK (320193 or 0000320193), or company name. Names must resolve unambiguously; use search_company first if unsure."
           },
+          "cik": {
+            "description": "CIK instead of company, e.g. 320193 or '0000320193'",
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 20
+              },
+              {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9999999999
+              }
+            ]
+          },
           "accession": {
-            "description": "Accession number, e.g. 0000320193-24-000123 (with company)",
+            "description": "Accession number, dashed 0000320193-24-000123 or 18 digits 000032019324000123 (with company or cik)",
             "type": "string",
-            "maxLength": 30
+            "maxLength": 200
           },
           "mode": {
             "default": "text",
