@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Usage stats (hosted server):** fewer lost batches (`flush_fail`): on Vercel the trailing flush runs inside the request (`waitUntil`, at most 10 s after the event instead of a detached 60 s timer that could fire in a frozen instance); one retry when it cannot double count (salt step after a network error; counters script only when the connection was never established); failures are logged (redacted) by error class. Client labels fall back to allowlisted `User-Agent` product tokens when `clientInfo` is unknown or the session's `initialize` was served by another instance (the User-Agent is never stored). Docs: how sessions (`initialize`) and calls (`tools/call`) are counted. Privacy policy updated for the User-Agent fallback.
+
 ## 0.2.0 (unreleased)
 
 - **npm package deprecated:** the npm package `edgar-entity-mcp` (last published version 0.1.0) is deprecated and no longer maintained; nothing further is published to npm. Use the hosted endpoint `https://edgar-entity-mcp.vercel.app/mcp` (primary) or run the server locally from the GitHub source (`git clone` → `npm ci` → `npm run build` → `node dist/stdio.js`). `package.json` is now `"private": true` (no `prepublishOnly`), `server.json` lists only the remote endpoint (no `packages`), and `.github/workflows/release.yml` publishes only to the MCP Registry. Rate-limit hints and the stdio `--help` text point to running from source instead of `npx`.

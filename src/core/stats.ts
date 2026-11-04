@@ -2,6 +2,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import type { Redis } from "@upstash/redis";
 import { config } from "../config.js";
 import { getRedis } from "./cache.js";
+import { logError } from "./errors.js";
 import { isRedisCapacityError, onRedisDegraded, redisDegraded } from "./degraded.js";
 import type { Principal } from "./quota.js";
 import type { UsageResult } from "./usage.js";
@@ -26,12 +27,27 @@ import type { UsageResult } from "./usage.js";
  * event after a quiet period flushes immediately, later ones are coalesced into a trailing flush).
  * Writes are fire-and-forget with a short timeout: a stats failure never fails or slows a request,
  * never trips degraded mode, and simply drops that batch (counted as flush_fail when possible).
+ *
+ * Serverless (Vercel): a flush must run while a request is alive, or the instance may be frozen
+ * mid-write (the write then fails or times out on thaw: flush_fail). Every flush is therefore handed
+ * to the request's waitUntil, and inside a request the trailing flush waits at most
+ * STATS_TRAILING_FLUSH_MS (not the full interval), so it completes before the instance can freeze.
+ * Failed steps are retried once only when that cannot double count (the idempotent salt step, or
+ * the flush script when the connection was never established).
+ *
+ * Counting: `init` = MCP `initialize` requests (sessions, including directory crawlers, health
+ * probes and clients that reconnect without calling a tool); `calls:<tool>` = `tools/call` requests.
+ * The two are independent, so sessions can far exceed calls.
  */
 export const STATS_RETENTION_DAYS = 30;
 /** The daily salt lives until this long after the end of its UTC day. */
 export const STATS_SALT_GRACE_SECONDS = 3600;
 export const STATS_FLUSH_INTERVAL_MS = 60_000;
 export const STATS_TIMEOUT_MS = 1_500;
+/** Inside a live request (waitUntil available) the trailing flush waits at most this long. */
+export const STATS_TRAILING_FLUSH_MS = 10_000;
+/** Delay before the single retry of a failed step that is safe to repeat. */
+export const STATS_RETRY_DELAY_MS = 250;
 export const STATS_TOP_CLIENTS = 50;
 export const STATS_MAX_DAYS = 30;
 /**
@@ -199,6 +215,31 @@ export function normalizeClient(info: unknown): string {
   return m ? `${label}/${Number(m[1])}` : label;
 }
 
+/** User-Agent product names that differ from clientInfo names (normalized like CLIENT_LOOKUP keys). */
+const UA_ONLY: Record<string, string> = { claudeuser: "claude", chatgptuser: "openai" };
+/** Product tokens that never identify an MCP client (browser engines, HTTP libraries, runtimes). */
+const UA_SKIP = new Set(["mozilla", "applewebkit", "chrome", "safari", "khtml", "gecko", "electron", "node", "undici", "nodefetch", "axios", "python", "pythonhttpx", "httpx", "aiohttp", "curl", "go", "gohttpclient", "okhttp", "java", "dart", "deno", "bun"]);
+
+/**
+ * Fallback client label from the User-Agent header (for clients whose initialize clientInfo is
+ * unknown, and for tool calls served by an instance that never saw the session's initialize).
+ * Only product tokens are examined and only an allowlisted label (or "other") is returned; the
+ * User-Agent itself is never stored.
+ */
+export function clientFromUserAgent(ua: string | null | undefined): string {
+  if (!ua) return "other";
+  const products = ua.slice(0, 512).replace(/\([^)]*\)/g, " ");
+  for (const m of products.matchAll(/([^\s/]+)(?:\/([^\s]+))?/g)) {
+    const key = m[1]!.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (!key || UA_SKIP.has(key)) continue;
+    const label = CLIENT_LOOKUP.get(key) ?? UA_ONLY[key];
+    if (!label) continue;
+    const v = m[2] ? /^v?(\d{1,4})(?:[._+-]|$)/i.exec(m[2]) : null;
+    return v ? `${label}/${Number(v[1])}` : label;
+  }
+  return "other";
+}
+
 interface Delta {
   fields: Map<string, number>;
   /** Principal ids (already hashed for IPs); salted and hashed again at flush time. Memory only. */
@@ -304,12 +345,30 @@ export function recordInitialize(principal: Principal | undefined, clientInfo: u
     if (!enabled()) return;
     const d = delta(isoDay(now))!;
     inc(d, "init");
-    if (principal) {
-      st.labels.delete(principal.id);
-      if (st.labels.size >= STATS_MAX_TRACKED_PRINCIPALS) st.labels.delete(st.labels.keys().next().value!);
-      st.labels.set(principal.id, normalizeClient(clientInfo));
-    }
+    if (principal) rememberLabel(principal.id, normalizeClient(clientInfo));
     schedule(now);
+  } catch {
+    /* never affects a request */
+  }
+}
+
+function rememberLabel(principalId: string, label: string): void {
+  st.labels.delete(principalId);
+  if (st.labels.size >= STATS_MAX_TRACKED_PRINCIPALS) st.labels.delete(st.labels.keys().next().value!);
+  st.labels.set(principalId, label);
+}
+
+/**
+ * Every HTTP request: if this instance has no allowlisted label for the principal yet (no
+ * initialize seen here, or clientInfo was unknown), derive one from the User-Agent. Memory only.
+ */
+export function noteClientUserAgent(principal: Principal | undefined, userAgent: string | null | undefined): void {
+  try {
+    if (!enabled() || !principal || !userAgent) return;
+    const current = st.labels.get(principal.id);
+    if (current && current !== "other") return;
+    const label = clientFromUserAgent(userAgent);
+    if (label !== "other") rememberLabel(principal.id, label);
   } catch {
     /* never affects a request */
   }
@@ -323,33 +382,60 @@ onRedisDegraded(() => {
   }
 });
 
-/** Hand a background promise to the Vercel runtime so it is not frozen mid-flush (no-op elsewhere). */
-function waitUntil(p: Promise<unknown>): void {
+/**
+ * The current request's waitUntil (Vercel; same mechanism as `waitUntil` from @vercel/functions),
+ * or undefined outside a request / off Vercel.
+ */
+function requestWaitUntil(): ((p: Promise<unknown>) => void) | undefined {
   try {
     const ctx = (globalThis as Record<symbol, { get?: () => { waitUntil?: (p: Promise<unknown>) => void } | undefined } | undefined>)[
       Symbol.for("@vercel/request-context")
     ];
-    ctx?.get?.()?.waitUntil?.(p);
+    const fn = ctx?.get?.()?.waitUntil;
+    return typeof fn === "function" ? fn : undefined;
   } catch {
-    /* not on Vercel */
+    return undefined; // not on Vercel
+  }
+}
+
+/** Hand a background promise to the Vercel runtime so it is not frozen mid-flush (no-op elsewhere). */
+function waitUntil(p: Promise<unknown>): void {
+  try {
+    requestWaitUntil()?.(p);
+  } catch {
+    /* ignore */
   }
 }
 
 function schedule(now: number): void {
   if (st.inFlight || st.timer) return; // a flush is pending; it will pick these events up
   if (redisDegraded()) return; // 0 commands; the first event after recovery flushes what is pending
-  const wait = Math.max(st.lastFlushAt + STATS_FLUSH_INTERVAL_MS, st.backoffUntil) - now;
+  let wait = Math.max(st.lastFlushAt + STATS_FLUSH_INTERVAL_MS, st.backoffUntil) - now;
   if (wait <= 0) {
     void startFlush();
     return;
   }
-  // Trailing flush; unref'd so it never keeps a process alive. If the instance is frozen first,
-  // the next event after the interval flushes (or the batch is lost: counters are approximate).
+  // Inside a live request (Vercel): keep the trailing flush short and tie it to the request via
+  // waitUntil, so the instance is not frozen before (or during) the write. Never earlier than a back-off.
+  // While backing off after a failure the timer stays detached (no keep-alive for minutes).
+  const keepAlive = st.backoffUntil - now > STATS_TRAILING_FLUSH_MS ? undefined : requestWaitUntil();
+  if (keepAlive) wait = Math.max(Math.min(wait, STATS_TRAILING_FLUSH_MS), st.backoffUntil - now);
+  let done!: () => void;
+  const fired = new Promise<void>((r) => (done = r));
+  // Trailing flush; unref'd so it never keeps a process alive. Elsewhere (self-hosted) the timer
+  // simply fires; if an instance is frozen first, the next event after the interval flushes.
   st.timer = setTimeout(() => {
     st.timer = undefined;
-    void startFlush();
+    void startFlush().finally(done);
   }, wait);
   st.timer.unref?.();
+  if (keepAlive) {
+    try {
+      keepAlive(fired);
+    } catch {
+      /* ignore */
+    }
+  }
 }
 
 function startFlush(): Promise<void> {
@@ -382,6 +468,44 @@ async function runScript(redis: Redis, sha: string, script: string, keys: string
   } catch (e) {
     if (!/NOSCRIPT/i.test(String(e))) throw e;
     return await redis.eval(script, keys, args);
+  }
+}
+
+const sleep = (ms: number) =>
+  new Promise<void>((r) => {
+    const t = setTimeout(r, ms);
+    t.unref?.();
+  });
+
+/** True when a request never reached Redis (DNS / connect failure), so repeating it cannot double count. */
+export function isConnectError(e: unknown): boolean {
+  const parts: string[] = [];
+  for (let cur: unknown = e, i = 0; cur && i < 4; cur = (cur as { cause?: unknown }).cause, i++) {
+    const o = cur as { code?: unknown; message?: unknown };
+    parts.push(String(o.code ?? ""), String(o.message ?? ""));
+  }
+  return /ECONNREFUSED|ENOTFOUND|EAI_AGAIN|UND_ERR_CONNECT_TIMEOUT|ENETUNREACH|EHOSTUNREACH/.test(parts.join(" "));
+}
+
+/** Connect errors plus a dropped socket (e.g. a keep-alive connection that died while the instance was frozen). */
+export function isNetworkError(e: unknown): boolean {
+  if (isConnectError(e)) return true;
+  const parts: string[] = [];
+  for (let cur: unknown = e, i = 0; cur && i < 4; cur = (cur as { cause?: unknown }).cause, i++) {
+    const o = cur as { code?: unknown; message?: unknown };
+    parts.push(String(o.code ?? ""), String(o.message ?? ""));
+  }
+  return /ECONNRESET|EPIPE|UND_ERR_SOCKET|UND_ERR_CLOSED|other side closed/i.test(parts.join(" "));
+}
+
+/** Run a step with the stats timeout; repeat it once (after a short pause) when `retryable(e)`. */
+async function attempt<T>(step: () => Promise<T>, retryable: (e: unknown) => boolean): Promise<T> {
+  try {
+    return await withTimeout(step(), STATS_TIMEOUT_MS);
+  } catch (e) {
+    if (!retryable(e)) throw e;
+    await sleep(STATS_RETRY_DELAY_MS);
+    return await withTimeout(step(), STATS_TIMEOUT_MS);
   }
 }
 
@@ -436,13 +560,17 @@ export async function flushStats(now = Date.now()): Promise<void> {
         inc(d, "flush_fail", st.failures);
         st.failures = 0;
       }
-      const salt = d.members.size ? await withTimeout(daySalt(redis, day, now), STATS_TIMEOUT_MS) : undefined;
+      // The salt script is idempotent (GET, else SET once): retried once after any network error.
+      const salt = d.members.size ? await attempt(() => daySalt(redis, day, now), isNetworkError) : undefined;
       if (!salt) d.members.clear();
       const k = statsKeys(day);
-      await withTimeout(runScript(redis, STATS_FLUSH_SCRIPT_SHA, STATS_FLUSH_SCRIPT, [k.c, k.u, k.cl], flushArgs(day, d, salt)), STATS_TIMEOUT_MS);
+      const args = flushArgs(day, d, salt);
+      // The counters script is not idempotent: retry only when the request never reached Redis.
+      await attempt(() => runScript(redis, STATS_FLUSH_SCRIPT_SHA, STATS_FLUSH_SCRIPT, [k.c, k.u, k.cl], args), isConnectError);
     } catch (e) {
       // Drop the batch (it may have been applied before a timeout; never double count) and back off.
       // Deliberately does not mark Redis degraded: stats are not worth disturbing quotas or caching.
+      logError("stats-flush", e); // server log only (redacted); helps tell timeouts from errors
       st.failures += 1;
       st.backoffUntil = Date.now() + (isRedisCapacityError(e) ? FULL_BACKOFF_MS : ERROR_BACKOFF_MS);
       return;
