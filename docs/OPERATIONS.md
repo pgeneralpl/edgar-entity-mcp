@@ -57,7 +57,7 @@ The hosted endpoint charges each tool call in **units** that approximate how man
 | `list_filings` | 1 (6 with date filters or offset, which may page through up to 4 older-history files) |
 | `get_financials` | 2 |
 | `compare_companies` | 1 per frame requested + 1 for resolving companies: 2 with `tag`; tags tried + 1 with `metric` (max 3 tags → 4; e.g. `revenue` / `net_income` 4 reserved, `gross_profit` 2), unused reservation refunded |
-| `get_filing_document` | 4 by `url`, 10 by `company` + `accession` |
+| `get_filing_document` | 4 by document `url`, 10 when the filing is looked up (`accession`, or a filing-level/index `url`) |
 | `get_insider_trades` | 6 + `limit` (max 20 filings → 26) |
 | `lookup_business_entity` | number of states (max 5); × 2 with `include_total`; + 1 when `offset` > 0 (max 11). OR is not counted (0 if it is the only state) once `offset` is past its 300-row window (59), where the call returns an empty page without querying. Anonymous HTTP callers cannot use `offset` > 100; `name` is limited to 100 characters (after NFKC), `contains` needs a 3+ character word and `starts_with` a 2+ character word; rejected calls are refunded |
 
