@@ -6,7 +6,7 @@ import { getUserUsageHooks, setSystemUsageHook, setUsageHooks, stderrUsageLogger
 import { chargeQuota, settleQuota, type Principal, type QuotaStore } from "../core/quota.js";
 import { clientIp, ipPrincipal, keyFailuresExceeded, recordKeyFailure, verifyApiKey } from "../core/apiKeys.js";
 import { logError } from "../core/errors.js";
-import { recordInitialize, recordToolCall } from "../core/stats.js";
+import { noteClientUserAgent, recordInitialize, recordToolCall } from "../core/stats.js";
 import { PACKAGE_NAME, VERSION } from "../version.js";
 
 export interface HttpHandlerOptions {
@@ -156,6 +156,7 @@ export function createHttpHandler(opts: HttpHandlerOptions = {}): (req: Request)
     });
     (forwarded as Request & { auth?: AuthInfo }).auth = auth;
     if (isInitialize) recordInitialize(principal, initClientInfo);
+    noteClientUserAgent(principal, req.headers.get("user-agent")); // allowlisted label only; the UA is never stored
     return withUtf8Charset(await base(forwarded));
   };
 }

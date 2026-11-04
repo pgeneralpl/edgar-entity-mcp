@@ -16,6 +16,10 @@ import {
   isoDay,
   latencyBucket,
   normalizeClient,
+  clientFromUserAgent,
+  isConnectError,
+  isNetworkError,
+  STATS_TRAILING_FLUSH_MS,
   readStats,
   recordInitialize,
   recordToolCall,
@@ -530,6 +534,132 @@ describe("HTTP handler integration", () => {
     expect(Object.fromEntries(f.zsets.get(statsKeys(DAY).cl)!)).toEqual({ "cursor/1": 1 });
     expect(f.hlls.get(statsKeys(DAY).u)?.size).toBe(1); // same principal for both requests
   });
+
+  it("labels clients by User-Agent when clientInfo is unknown or initialize ran on another instance", async () => {
+    setCache(new MemoryCache(), new MemoryCache());
+    const tickers = JSON.stringify({ fields: ["cik", "name", "ticker", "exchange"], data: [[320193, "Apple Inc.", "AAPL", "Nasdaq"]] });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: RequestInfo | URL, i?: RequestInit) => (String(u).startsWith(FAKE) ? f.fetchStub(u, i) : new Response(tickers, { headers: { "content-type": "application/json" } }))),
+    );
+    const h = createHttpHandler({ quotaStore: new MemoryQuotaStore() });
+    const post = (ip: string, ua: string, body: unknown) =>
+      h(
+        new Request("https://x/mcp", {
+          method: "POST",
+          headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "x-real-ip": ip, "user-agent": ua },
+          body: JSON.stringify(body),
+        }),
+      ).then((r) => r.text());
+    const callTool = { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "search_company", arguments: { query: "AAPL" } } };
+    // (a) unknown clientInfo name, known UA
+    await post("198.51.100.10", "Cursor/1.7.2 Chrome/1 Electron/1", { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "some-internal-name", version: "9" } } });
+    await post("198.51.100.10", "Cursor/1.7.2 Chrome/1 Electron/1", callTool);
+    // (b) no initialize seen by this instance (stateless follow-up), known UA
+    await post("198.51.100.11", "Claude-User", callTool);
+    // (c) unknown everything: not labelled
+    await post("198.51.100.12", "python-httpx/0.28", callTool);
+    await settle();
+    await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(Object.fromEntries(f.zsets.get(statsKeys(DAY).cl)!)).toEqual({ "cursor/1": 1, claude: 1 });
+    // The raw User-Agent never reaches Redis.
+    expect(JSON.stringify(f.commands)).not.toMatch(/Electron|Claude-User|httpx|some-internal-name/);
+  });
+});
+
+describe("flush robustness (serverless)", () => {
+  const CTX = Symbol.for("@vercel/request-context");
+  afterEach(() => {
+    delete (globalThis as Record<symbol, unknown>)[CTX];
+  });
+
+  it("inside a request the trailing flush is short and handed to waitUntil (no detached 60 s timer)", async () => {
+    const held: Promise<unknown>[] = [];
+    (globalThis as Record<symbol, unknown>)[CTX] = { get: () => ({ waitUntil: (p: Promise<unknown>) => held.push(p) }) };
+    recordToolCall(call(), T0); // leading flush
+    await settle();
+    expect(held.length).toBe(1);
+    recordToolCall(call(), T0 + 1000);
+    expect(held.length).toBe(2); // the trailing flush keeps the request alive until it is written
+    await vi.advanceTimersByTimeAsync(STATS_TRAILING_FLUSH_MS);
+    await settle();
+    expect(f.hashes.get(statsKeys(DAY).c)?.get("calls:search_company")).toBe(2);
+    let resolved = false;
+    void Promise.all(held).then(() => (resolved = true));
+    await settle();
+    expect(resolved).toBe(true);
+  });
+
+  it("outside a request (self-hosted) the trailing flush still waits the full interval", async () => {
+    recordToolCall(call(), T0);
+    await settle();
+    recordToolCall(call(), T0 + 1000);
+    await vi.advanceTimersByTimeAsync(STATS_TRAILING_FLUSH_MS);
+    await settle();
+    expect(f.hashes.get(statsKeys(DAY).c)?.get("calls:search_company")).toBe(1);
+    await vi.advanceTimersByTimeAsync(STATS_FLUSH_INTERVAL_MS);
+    await settle();
+    expect(f.hashes.get(statsKeys(DAY).c)?.get("calls:search_company")).toBe(2);
+  });
+
+  it("retries once when the connection was never established; no flush_fail, no double count", async () => {
+    let failures = 1;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (u: RequestInfo | URL, i?: RequestInit) => {
+        if (failures-- > 0) throw new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" }) });
+        return f.fetchStub(u, i);
+      }),
+    );
+    recordToolCall(call(), T0);
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    const h = f.hashes.get(statsKeys(DAY).c)!;
+    expect(h.get("calls:search_company")).toBe(1);
+    expect(h.get("flush_fail")).toBeUndefined();
+  });
+
+  it("does not retry the counters script after other errors (it may have been applied)", async () => {
+    f.state.failWith = "ERR something broke";
+    recordToolCall(call({ principal: undefined }), T0); // no members: no salt step, only the counters script
+    await settle();
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(f.commands.filter((c) => /^eval/i.test(String(c[0]))).length).toBe(1);
+    expect(statsPending().fields).toBe(0); // batch dropped, counted as flush_fail later
+  });
+
+  it("classifies connect-phase errors", () => {
+    expect(isConnectError(new TypeError("fetch failed", { cause: { code: "ENOTFOUND" } }))).toBe(true);
+    expect(isConnectError(Object.assign(new Error("x"), { code: "UND_ERR_CONNECT_TIMEOUT" }))).toBe(true);
+    expect(isConnectError(new Error("stats write timed out"))).toBe(false);
+    expect(isConnectError(new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }))).toBe(false);
+    expect(isConnectError(new Error("ERR something broke"))).toBe(false);
+    // Dropped sockets: retried only for the idempotent salt step.
+    expect(isNetworkError(new TypeError("fetch failed", { cause: { code: "ECONNRESET" } }))).toBe(true);
+    expect(isNetworkError(new TypeError("fetch failed", { cause: { code: "UND_ERR_SOCKET", message: "other side closed" } }))).toBe(true);
+    expect(isNetworkError(new Error("stats write timed out"))).toBe(false);
+  });
+});
+
+describe("client label from User-Agent (fallback)", () => {
+  it("maps allowlisted product tokens only; the UA text is never returned", () => {
+    expect(clientFromUserAgent("Cursor/1.7.2 Chrome/132.0.6834.210 Electron/34.3.4 Safari/537.36")).toBe("cursor/1");
+    expect(clientFromUserAgent("Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36 (KHTML, like Gecko) Cursor/2.0.1 Chrome/1 Electron/1 Safari/1")).toBe("cursor/2");
+    expect(clientFromUserAgent("Claude-User")).toBe("claude");
+    expect(clientFromUserAgent("claude-code/2.0.14 (external, cli)")).toBe("claude-code/2");
+    expect(clientFromUserAgent("openai-mcp/1.0.0")).toBe("openai/1");
+    expect(clientFromUserAgent("mcp-remote/0.1.29 node/22")).toBe("mcp-remote/0");
+    expect(clientFromUserAgent("node")).toBe("other");
+    expect(clientFromUserAgent("python-httpx/0.28.1")).toBe("other");
+    expect(clientFromUserAgent("Mozilla/5.0 (cursor; claude) Chrome/1")).toBe("other"); // comments ignored
+    expect(clientFromUserAgent("my-secret-agent/1.0 evil@example.org")).toBe("other");
+    expect(clientFromUserAgent("")).toBe("other");
+    expect(clientFromUserAgent(undefined)).toBe("other");
+    expect(clientFromUserAgent("x".repeat(10_000) + " Cursor/1")).toBe("other"); // bounded input
+  });
 });
 
 describe("docs", () => {
@@ -546,5 +676,7 @@ describe("docs", () => {
     expect(readme).toMatch(/STATS_ENABLED/);
     expect(readme).not.toMatch(/90-day|90 days/);
     expect(readme).not.toMatch(/Production and Preview/);
+    const ops = readFileSync(new URL("../docs/OPERATIONS.md", import.meta.url), "utf8");
+    expect(ops).toMatch(/Sessions vs calls/);
   });
 });
